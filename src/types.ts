@@ -32,6 +32,12 @@ export interface ContainerConfig {
   timeout?: number; // Default: 300000 (5 minutes)
 }
 
+export interface Persona {
+  name: string;
+  trigger: RegExp;
+  model: string;
+}
+
 export interface RegisteredGroup {
   name: string;
   folder: string;

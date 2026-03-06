@@ -244,3 +244,63 @@ When scheduling tasks for other groups, use the `target_group_jid` parameter wit
 - `schedule_task(prompt: "...", schedule_type: "cron", schedule_value: "0 9 * * 1", target_group_jid: "120363336345536173@g.us")`
 
 The task will run in that group's context with access to their files and memory.
+
+---
+
+## 海南航空机票查询控制
+
+宿主机上有一个每小时自动运行的海南航空特价机票扫描脚本。通过写入配置文件来控制查询参数和开关。
+
+配置文件路径（容器内）：`/workspace/group/hnair-config.json`
+
+默认值（无配置文件时）：深圳 -> 乌鲁木齐，最近半年，低于 300 元。
+
+### 启动/恢复查询（可带参数）
+
+当用户说「继续查询机票信息」「恢复机票查询」「开始查机票」或带参数如「查深圳到成都 低于500元的机票」时，从用户消息中提取参数，写入配置：
+
+```bash
+cat > /workspace/group/hnair-config.json << 'EOF'
+{
+  "enabled": true,
+  "origin": "深圳",
+  "destination": "乌鲁木齐",
+  "priceMax": 300,
+  "daysAhead": 180
+}
+EOF
+```
+
+参数解析规则：
+- 出发地：「从XX出发」「XX到YY」中的 XX，默认「深圳」
+- 目的地：「到YY」「去YY」「飞YY」中的 YY，默认「乌鲁木齐」
+- 价格：「低于N元」「N元以下」中的 N，默认 300
+- 时间：「最近N个月」转换为天数（N*30），「最近半年」=180天，默认 180
+
+示例用户消息和对应配置：
+- 「继续查询机票信息」→ 用默认值 enabled=true
+- 「查深圳到成都 低于500元」→ origin=深圳, destination=成都, priceMax=500
+- 「帮我看北京飞三亚 200元以下」→ origin=北京, destination=三亚, priceMax=200
+- 「查最近3个月乌鲁木齐到深圳低于800」→ origin=乌鲁木齐, destination=深圳, priceMax=800, daysAhead=90
+
+回复用户确认参数，例如：「已开启机票查询：深圳-成都，低于500元，每小时自动查一次。说「不再查询机票信息」可以停止。」
+
+### 停止查询
+
+当用户说「不再查询机票信息」「停止机票查询」「关闭机票提醒」等类似意思时：
+
+```bash
+cat > /workspace/group/hnair-config.json << 'EOF'
+{"enabled": false}
+EOF
+```
+
+回复用户确认已停止。如需恢复，告知可以说「继续查询机票信息」并带上参数。
+
+### 查询状态
+
+当用户问机票查询状态时：
+
+```bash
+cat /workspace/group/hnair-config.json 2>/dev/null || echo '无配置文件，使用默认值（深圳-乌鲁木齐 300元）运行中'
+```

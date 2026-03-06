@@ -1,12 +1,16 @@
 import fs from 'fs';
 import path from 'path';
+import { spawn } from 'node:child_process';
 
 import {
   ASSISTANT_NAME,
+  DEFAULT_PERSONA,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
-  TRIGGER_PATTERN,
+  messageHasTrigger,
+  getPersonaFromMessage,
 } from './config.js';
+import { Persona } from './types.js';
 import './channels/index.js';
 import {
   getChannelFactory,
@@ -50,6 +54,7 @@ import {
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { isStockDailyRerunCommand } from './commands/stock-daily.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -62,6 +67,8 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+
+const stockDailyRunByChat = new Map<string, { startedAt: number }>();
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -164,10 +171,134 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const allowlistCfg = loadSenderAllowlist();
     const hasTrigger = missedMessages.some(
       (m) =>
-        TRIGGER_PATTERN.test(m.content.trim()) &&
+        messageHasTrigger(m.content) &&
         (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
     );
     if (!hasTrigger) return true;
+  }
+
+  // Main group admin command: rerun today's stock data push.
+  // Keep it strict to avoid accidentally executing host scripts from normal chat.
+  if (isMainGroup && missedMessages.length === 1) {
+    const m = missedMessages[0];
+    if (!m.is_bot_message && isStockDailyRerunCommand(m.content)) {
+      const allowlistCfg = loadSenderAllowlist();
+      const senderAllowed =
+        m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg);
+      if (!senderAllowed) {
+        logger.warn(
+          { chatJid, sender: m.sender },
+          'Stock daily rerun command denied by sender allowlist',
+        );
+        return true;
+      }
+
+      const alreadyRunning = stockDailyRunByChat.has(chatJid);
+      if (alreadyRunning) {
+        await channel.sendMessage(chatJid, '股票数据正在重跑中，请稍后再试。');
+        return true;
+      }
+
+      // Advance cursor so this command is not retried.
+      const previousCursor = lastAgentTimestamp[chatJid] || '';
+      lastAgentTimestamp[chatJid] = m.timestamp;
+      saveState();
+
+      try {
+        await channel.setTyping?.(chatJid, true);
+        await channel.sendMessage(
+          chatJid,
+          '收到，开始重跑今日股票数据。完成后我会回一条结果。',
+        );
+
+        const scriptPath = path.resolve(process.cwd(), 'scripts/stock-daily-push.sh');
+        stockDailyRunByChat.set(chatJid, { startedAt: Date.now() });
+
+        const proc = spawn('bash', [scriptPath], {
+          env: process.env,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        const tail: string[] = [];
+        const pushTail = (chunk: Buffer) => {
+          const s = chunk.toString('utf8');
+          for (const line of s.split('\n')) {
+            if (!line.trim()) continue;
+            tail.push(line);
+            if (tail.length > 40) tail.shift();
+          }
+        };
+        proc.stdout?.on('data', pushTail);
+        proc.stderr?.on('data', pushTail);
+
+        const timeoutMs = 30 * 60 * 1000;
+        const timeout = setTimeout(() => {
+          try {
+            proc.kill('SIGKILL');
+          } catch {
+            // ignore
+          }
+        }, timeoutMs);
+
+        proc.on('close', async (code, signal) => {
+          clearTimeout(timeout);
+          stockDailyRunByChat.delete(chatJid);
+          try {
+            await channel.setTyping?.(chatJid, false);
+            if (code === 0) {
+              await channel.sendMessage(
+                chatJid,
+                '今日股票数据重跑完成，报告已重新生成并推送。若需要排查细节可看 logs/stock-daily.log。',
+              );
+            } else {
+              const excerpt = tail.slice(-20).join('\n');
+              await channel.sendMessage(
+                chatJid,
+                `今日股票数据重跑失败（exit=${code ?? 'null'} signal=${signal ?? 'null'}）。\n` +
+                  (excerpt ? `最近输出：\n${excerpt}\n` : '') +
+                  '可查看 logs/stock-daily.log 获取完整日志。',
+              );
+            }
+          } catch (err) {
+            logger.warn({ err, chatJid }, 'Failed to report stock rerun result');
+          }
+        });
+
+        proc.on('error', async (err) => {
+          stockDailyRunByChat.delete(chatJid);
+          await channel.setTyping?.(chatJid, false);
+          lastAgentTimestamp[chatJid] = previousCursor;
+          saveState();
+          logger.error({ err, chatJid }, 'Failed to start stock daily rerun');
+          await channel.sendMessage(
+            chatJid,
+            `启动重跑失败：${err.message}\n请查看 logs/stock-daily.log。`,
+          );
+        });
+      } catch (err) {
+        lastAgentTimestamp[chatJid] = previousCursor;
+        saveState();
+        stockDailyRunByChat.delete(chatJid);
+        await channel.setTyping?.(chatJid, false);
+        logger.error({ err, chatJid }, 'Stock daily rerun command failed');
+        await channel.sendMessage(
+          chatJid,
+          '重跑命令执行失败，请查看 logs/stock-daily.log。',
+        );
+      }
+
+      return true;
+    }
+  }
+
+  // Determine which persona was triggered (for multi-model routing)
+  let persona: Persona = DEFAULT_PERSONA;
+  for (const m of missedMessages) {
+    const matched = getPersonaFromMessage(m.content);
+    if (matched) {
+      persona = matched;
+      break;
+    }
   }
 
   const prompt = formatMessages(missedMessages);
@@ -180,7 +311,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    { group: group.name, messageCount: missedMessages.length, persona: persona.name, model: persona.model },
     'Processing messages',
   );
 
@@ -202,7 +333,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
+  const output = await runAgent(group, prompt, chatJid, persona, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -259,6 +390,7 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
+  persona: Persona,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
@@ -309,7 +441,8 @@ async function runAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
-        assistantName: ASSISTANT_NAME,
+        assistantName: persona.name,
+        modelOverride: persona.model,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -392,7 +525,7 @@ async function startMessageLoop(): Promise<void> {
             const allowlistCfg = loadSenderAllowlist();
             const hasTrigger = groupMessages.some(
               (m) =>
-                TRIGGER_PATTERN.test(m.content.trim()) &&
+                messageHasTrigger(m.content) &&
                 (m.is_from_me ||
                   isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );

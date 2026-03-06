@@ -2,11 +2,18 @@ import os from 'os';
 import path from 'path';
 
 import { readEnvFile } from './env.js';
+import { Persona } from './types.js';
 
 // Read config values from .env (falls back to process.env).
 // Secrets are NOT read here — they stay on disk and are loaded only
 // where needed (container-runner.ts) to avoid leaking to child processes.
-const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER']);
+const envConfig = readEnvFile([
+  'ASSISTANT_NAME',
+  'ASSISTANT_HAS_OWN_NUMBER',
+  'PERSONAS',
+  'MODEL_NAME',
+  'TRIGGER_ANYWHERE',
+]);
 
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -58,10 +65,86 @@ function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// --- Persona system ---
+// Format: PERSONAS=Andy:compass-max,Mark:QwQ-32B,Code:codecompass
+const defaultModel =
+  process.env.MODEL_NAME || envConfig.MODEL_NAME || 'gpt-4o';
+
+function parsePersonas(raw: string | undefined): Persona[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const colonIdx = entry.indexOf(':');
+      if (colonIdx === -1) return null;
+      const name = entry.slice(0, colonIdx).trim();
+      const model = entry.slice(colonIdx + 1).trim();
+      if (!name || !model) return null;
+      return {
+        name,
+        trigger: new RegExp(`^@${escapeRegex(name)}\\b`, 'i'),
+        model,
+      };
+    })
+    .filter((p): p is Persona => p !== null);
+}
+
+const personasRaw = process.env.PERSONAS || envConfig.PERSONAS;
+export const PERSONAS: Persona[] = parsePersonas(personasRaw);
+
+// Default persona used for self-chat / no-trigger-required groups
+export const DEFAULT_PERSONA: Persona =
+  PERSONAS.length > 0
+    ? PERSONAS[0]
+    : { name: ASSISTANT_NAME, trigger: new RegExp(`^@${escapeRegex(ASSISTANT_NAME)}\\b`, 'i'), model: defaultModel };
+
+// Trigger pattern matches ANY persona name (or just ASSISTANT_NAME if no personas configured)
+const allNames =
+  PERSONAS.length > 0
+    ? PERSONAS.map((p) => escapeRegex(p.name))
+    : [escapeRegex(ASSISTANT_NAME)];
 export const TRIGGER_PATTERN = new RegExp(
-  `^@${escapeRegex(ASSISTANT_NAME)}\\b`,
+  `^@(${allNames.join('|')})\\b`,
   'i',
 );
+
+/** When true, group messages trigger if they contain @Name anywhere (e.g. "十分钟后提醒我@Andy"). */
+export const TRIGGER_ANYWHERE =
+  (process.env.TRIGGER_ANYWHERE || envConfig.TRIGGER_ANYWHERE) === 'true';
+
+/** Pattern that matches @Name anywhere in the message (used when TRIGGER_ANYWHERE is true). */
+const TRIGGER_PATTERN_ANYWHERE = new RegExp(
+  `@(${allNames.join('|')})\\b`,
+  'gi',
+);
+
+/** Returns true if message contains a trigger (at start or anywhere if TRIGGER_ANYWHERE). */
+export function messageHasTrigger(text: string): boolean {
+  const t = text.trim();
+  if (TRIGGER_PATTERN.test(t)) return true;
+  if (TRIGGER_ANYWHERE && TRIGGER_PATTERN_ANYWHERE.test(t)) return true;
+  return false;
+}
+
+/** Given a message, return the matched persona (or null). Prefers match at start, then first @Name anywhere. */
+export function getPersonaFromMessage(text: string): Persona | null {
+  const t = text.trim();
+  const atStart = t.match(TRIGGER_PATTERN);
+  if (atStart) {
+    const name = atStart[1].toLowerCase();
+    return PERSONAS.find((p) => p.name.toLowerCase() === name) || null;
+  }
+  if (TRIGGER_ANYWHERE) {
+    const anywhere = t.match(TRIGGER_PATTERN_ANYWHERE);
+    if (anywhere) {
+      const name = anywhere[0].slice(1).toLowerCase();
+      return PERSONAS.find((p) => p.name.toLowerCase() === name) || null;
+    }
+  }
+  return null;
+}
 
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Uses system timezone by default

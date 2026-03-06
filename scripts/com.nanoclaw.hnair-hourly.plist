@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nanoclaw.hnair-hourly</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>npx</string>
+        <string>tsx</string>
+        <string>scripts/hnair-ticket-check.ts</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/huanyu.guo/self/nanoclaw</string>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/huanyu.guo</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/huanyu.guo/self/nanoclaw/logs/hnair-hourly-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/huanyu.guo/self/nanoclaw/logs/hnair-hourly-stderr.log</string>
+</dict>
+</plist>
