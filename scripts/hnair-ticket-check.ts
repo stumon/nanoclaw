@@ -159,7 +159,7 @@ function formatDateShort(dateStr: string): string {
 
 // ── 数据源 ────────────────────────────────────────────
 
-async function fetchGntjjpAndFilter(cfg: HnairConfig, maxItems: number = 10): Promise<GntjjpFlight[]> {
+async function fetchGntjjpForRoute(cfg: HnairConfig): Promise<GntjjpFlight[]> {
   try {
     const res = await fetch(GNTJJP_URL, { headers: { Accept: 'application/json' } });
     if (!res.ok) {
@@ -168,15 +168,13 @@ async function fetchGntjjpAndFilter(cfg: HnairConfig, maxItems: number = 10): Pr
     }
     const data = (await res.json()) as { flightResults?: GntjjpFlight[] };
     const list = data.flightResults || [];
-    const filtered = list.filter(
+    const routeFlights = list.filter(
       (f) =>
         f.Origin === cfg.origin &&
         f.Destination === cfg.destination &&
-        Number.isFinite(Number(f.Price)) &&
-        Number(f.Price) < cfg.priceMax
+        Number.isFinite(Number(f.Price))
     );
-    const sorted = filtered.sort((a, b) => Number(a.Price) - Number(b.Price));
-    return sorted.slice(0, maxItems);
+    return routeFlights.sort((a, b) => Number(a.Price) - Number(b.Price));
   } catch (e) {
     log(`gntjjp 请求失败: ${e instanceof Error ? e.message : String(e)}`);
     return [];
@@ -379,69 +377,70 @@ async function main(): Promise<void> {
   log('=== 海南航空特价扫描开始 ===');
   log(`路线: ${route} | 价格阈值: ${cfg.priceMax}元 | 扫描范围: ${cfg.daysAhead}天`);
 
-  // 1. Playwright 无头浏览器
-  let browserDepartDate = '';
-  let prices: number[] = [];
-  let hasExactTarget = false;
+  let overallMinPrice = Infinity;
+  let notified = false;
 
-  if (USE_BROWSER) {
-    log('使用无头浏览器查询（不会打开可见窗口）');
+  // 1. gntjjp 接口（返回该路线全部航班，不预过滤价格）
+  const allFlights = await fetchGntjjpForRoute(cfg);
+  if (allFlights.length > 0) {
+    const apiMin = Number(allFlights[0].Price);
+    overallMinPrice = Math.min(overallMinPrice, apiMin);
+    log(`gntjjp 接口: ${route} 共 ${allFlights.length} 条航班, 最低价 ${apiMin}元`);
+
+    const cheapFlights = allFlights.filter((f) => Number(f.Price) < cfg.priceMax);
+    if (cheapFlights.length > 0) {
+      log(`其中 ${cheapFlights.length} 条低于 ${cfg.priceMax}元，发送提醒`);
+      const lines = cheapFlights.slice(0, 10).map((f) => `${formatDateFull(f.Date)} ${Number(f.Price)}元`);
+      sendIpcAlert(`海南航空特价提醒：${route} 低于${cfg.priceMax}元\n\n航班信息：\n${lines.join('\n')}`);
+      notified = true;
+    }
+  } else {
+    log(`gntjjp 接口: ${route} 无数据`);
+  }
+
+  // 2. Playwright 无头浏览器（补充）
+  if (USE_BROWSER && !notified) {
+    log('使用无头浏览器查询');
     try {
       const r = await checkByBrowser(cfg);
-      prices = r.prices;
-      hasExactTarget = r.hasExactTarget;
-      browserDepartDate = r.departDate;
+      if (r.prices.length) {
+        const sorted = [...r.prices].sort((a, b) => a - b);
+        const browserMin = sorted[0];
+        overallMinPrice = Math.min(overallMinPrice, browserMin);
+        log(`浏览器: 抓到 ${r.prices.length} 个价格, 最低价 ${browserMin}元`);
+
+        if (browserMin <= cfg.priceMax) {
+          log(`最低价 ${browserMin} <= 阈值 ${cfg.priceMax}，发送提醒`);
+          const dateDisplay = r.departDate ? formatDateFull(r.departDate) : '近期';
+          const top5 = sorted.filter((p) => p <= cfg.priceMax).slice(0, 5);
+          const priceList = top5.map((p) => `${dateDisplay} ${p}元`).join('\n');
+          sendIpcAlert(`海南航空特价提醒：${route} 低于${cfg.priceMax}元\n\n航班信息：\n${priceList}`);
+          notified = true;
+        }
+      } else {
+        log('浏览器: 未能从页面解析到价格');
+      }
     } catch (e) {
       log(`浏览器查询失败: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
-  // 2. 国内特价接口（补充）
-  const flights = await fetchGntjjpAndFilter(cfg, 10);
-
-  // 3. 优先展示有结构化日期的接口数据
-  if (flights.length > 0) {
-    log(`接口筛选到 ${flights.length} 条 ${route} 低于${cfg.priceMax}元`);
-    const lines = flights.map((f) => `${formatDateFull(f.Date)} ${Number(f.Price)}元`);
-    const body = ['航班信息：', ...lines].join('\n');
-    sendIpcAlert(`海南航空特价提醒：${route} 低于${cfg.priceMax}元\n\n${body}`);
-    log('=== 扫描结束 ===');
-    return;
-  }
-
-  // 4. 浏览器抓到的价格
-  if (prices.length) {
-    const sorted = [...prices].sort((a, b) => a - b);
-    const min = sorted[0];
-    log(`抓到价格数量: ${prices.length}; 最低价: ${min}元; 前几个: ${sorted.slice(0, 12).join('元, ')}元`);
-    if (Number.isFinite(cfg.priceMax) && min <= cfg.priceMax) {
-      log(`最低价 ${min} <= 阈值 ${cfg.priceMax}，发送提醒`);
-      const dateDisplay = browserDepartDate ? formatDateFull(browserDepartDate) : '近期';
-      const top5 = sorted.filter((p) => p <= cfg.priceMax).slice(0, 5);
-      const priceList = top5.map((p) => `${dateDisplay} ${p}元`).join('\n');
-      sendIpcAlert(`海南航空特价提醒：${route} 低于${cfg.priceMax}元\n\n航班信息：\n${priceList}`);
-      log('=== 扫描结束 ===');
-      return;
+  // 3. API 兜底
+  if (!notified && !USE_BROWSER && API_URL.trim()) {
+    log('使用 HNAIR_API_URL 兜底查询');
+    const hasExactTarget = await checkByApi();
+    if (hasExactTarget) {
+      log(`发现 ${TARGET_PRICE}元特价，发送提醒`);
+      sendIpcAlert(`海南航空特价提醒：${route}\n\n航班信息：\n近期 ${TARGET_PRICE}元`);
+      notified = true;
+      overallMinPrice = Math.min(overallMinPrice, Number(TARGET_PRICE));
     }
-    log(`最低价 ${min} > 阈值 ${cfg.priceMax}，不提醒`);
-  } else if (!USE_BROWSER && API_URL.trim()) {
-    log('浏览器模式已关闭，使用 HNAIR_API_URL 查询');
-    hasExactTarget = await checkByApi();
-  } else if (!USE_BROWSER) {
-    log('浏览器模式已关闭且未配置 HNAIR_API_URL，跳过扫描。');
-    log('=== 扫描结束 ===');
-    return;
-  } else {
-    log('未能从页面解析到任何价格文本');
   }
 
-  if (hasExactTarget) {
-    log(`发现 ${TARGET_PRICE}元特价，发送提醒`);
-    const dateDisplay = browserDepartDate ? formatDateFull(browserDepartDate) : '近期';
-    sendIpcAlert(`海南航空特价提醒：${route}\n\n航班信息：\n${dateDisplay} ${TARGET_PRICE}元`);
-  } else {
-    log(`未发现精确目标价 ${TARGET_PRICE}元`);
-  }
+  // 摘要日志（每次运行必打印）
+  const minDisplay = Number.isFinite(overallMinPrice) ? `${overallMinPrice}元` : '无数据';
+  const status = notified ? '已通知' : (Number.isFinite(overallMinPrice) ? '未达阈值' : '无数据');
+  log(`[摘要] ${route} 最低价: ${minDisplay} | 阈值: ${cfg.priceMax}元 | ${status}`);
   log('=== 扫描结束 ===');
 }
 

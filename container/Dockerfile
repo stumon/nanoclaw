@@ -29,6 +29,9 @@ RUN apt-get update && apt-get install -y \
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
+# Prefer IPv4 DNS resolution to avoid timeouts with IPv6 NAT
+ENV NODE_OPTIONS=--dns-result-order=ipv4first
+
 # Install agent-browser globally (claude-code no longer needed)
 RUN npm install -g agent-browser
 

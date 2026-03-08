@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Apple Container Network Recovery on Wake
+
+  This launchd job re-applies IP forwarding and NAT rules whenever
+  the network changes (e.g. after sleep/wake or WiFi reconnect).
+
+  Install:
+    1. Edit the ProgramArguments path below to match your nanoclaw install location
+    2. Copy to /Library/LaunchDaemons/ (runs as root, required for sysctl/pfctl):
+         sudo cp scripts/com.nanoclaw.network-fix.plist /Library/LaunchDaemons/
+    3. Load:
+         sudo launchctl load /Library/LaunchDaemons/com.nanoclaw.network-fix.plist
+
+  Uninstall:
+    sudo launchctl unload /Library/LaunchDaemons/com.nanoclaw.network-fix.plist
+    sudo rm /Library/LaunchDaemons/com.nanoclaw.network-fix.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nanoclaw.network-fix</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/huanyu.guo/self/nanoclaw/scripts/fix-container-network.sh</string>
+    </array>
+    <key>WatchPaths</key>
+    <array>
+        <string>/Library/Preferences/SystemConfiguration</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/nanoclaw-network-fix.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/nanoclaw-network-fix.log</string>
+</dict>
+</plist>

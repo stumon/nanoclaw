@@ -14,7 +14,9 @@ describe('isStockDailyRerunCommand', () => {
 
   it('matches loose phrasing with core words', () => {
     expect(isStockDailyRerunCommand('@Andy 麻烦重跑一下股票数据')).toBe(true);
-    expect(isStockDailyRerunCommand('能不能重新跑一下今天股票数据？')).toBe(true);
+    expect(isStockDailyRerunCommand('能不能重新跑一下今天股票数据？')).toBe(
+      true,
+    );
   });
 
   it('does not match unrelated text', () => {
@@ -24,4 +26,3 @@ describe('isStockDailyRerunCommand', () => {
     expect(isStockDailyRerunCommand('')).toBe(false);
   });
 });
-

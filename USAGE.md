@@ -74,6 +74,116 @@ launchctl kickstart -k gui/$(id -u)/com.nanoclaw
 
 **不要在终端里输入中文消息！** 文档下面的"在聊天群里说"示例都是你在 WhatsApp/Telegram 聊天群中发送的消息，不是终端命令。
 
+## 容器网络修复（睡眠唤醒后）
+
+Apple Container 依赖宿主机的 IP 转发和 NAT 规则才能访问外网。电脑睡眠/合盖后这些规则可能丢失，导致 Andy 回复 `Error calling LLM API: Connection error`。
+
+**手动修复（立即生效）：**
+
+```bash
+cd /Users/huanyu.guo/self/nanoclaw
+sudo ./scripts/fix-container-network.sh
+```
+
+脚本做了两件事：`sysctl -w net.inet.ip.forwarding=1` 和重新配置 `pfctl` NAT 规则。
+
+**安装自动修复（一次性，之后每次唤醒自动执行）：**
+
+```bash
+# 复制 plist 到系统目录（需要 sudo）
+sudo cp /Users/huanyu.guo/self/nanoclaw/scripts/com.nanoclaw.network-fix.plist /Library/LaunchDaemons/
+
+# 加载
+sudo launchctl load /Library/LaunchDaemons/com.nanoclaw.network-fix.plist
+```
+
+安装后，macOS 会在网络变化时（包括睡眠唤醒、WiFi 切换）自动执行修复脚本。
+
+**验证网络是否正常：**
+
+```bash
+# 检查 IP 转发是否开启（期望值为 1）
+sysctl net.inet.ip.forwarding
+
+# 测试容器是否能访问外网
+container run --rm --entrypoint curl nanoclaw-agent:latest \
+  -s4 --connect-timeout 5 -o /dev/null -w "%{http_code}" https://api.anthropic.com
+# 期望输出: 404（表示网络通了，只是没有有效请求）
+```
+
+**卸载自动修复：**
+
+```bash
+sudo launchctl unload /Library/LaunchDaemons/com.nanoclaw.network-fix.plist
+sudo rm /Library/LaunchDaemons/com.nanoclaw.network-fix.plist
+```
+
+## 容器镜像重建
+
+修改了 `container/` 目录下的文件（Dockerfile、agent-runner 等）后，需要重建容器镜像。
+
+**所有命令必须在项目根目录下执行：**
+
+```bash
+cd /Users/huanyu.guo/self/nanoclaw
+
+# 重建容器镜像
+./container/build.sh
+
+# 重启 NanoClaw 使新镜像生效
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw
+```
+
+## 查看日志
+
+日志文件路径：
+
+| 文件 | 内容 |
+|------|------|
+| `~/self/nanoclaw/logs/nanoclaw.log` | 主日志（消息收发、容器启停、Agent 输出） |
+| `~/self/nanoclaw/logs/nanoclaw.error.log` | 仅错误日志 |
+| `~/self/nanoclaw/groups/whatsapp_main/logs/` | 每次容器运行的详细日志 |
+
+常用命令（在终端执行）：
+
+```bash
+# 实时监控全部日志
+tail -f ~/self/nanoclaw/logs/nanoclaw.log
+
+# 只看收到的消息
+grep "Incoming message" ~/self/nanoclaw/logs/nanoclaw.log | tail -20
+
+# 只看 Andy 回复的内容
+grep "Agent output" ~/self/nanoclaw/logs/nanoclaw.log | tail -20
+
+# 只看错误
+grep "ERROR" ~/self/nanoclaw/logs/nanoclaw.log | tail -20
+
+# 看容器启动和挂载信息
+grep -E "Spawning|Mount allowlist|Mount validated|REJECTED" ~/self/nanoclaw/logs/nanoclaw.log | tail -20
+
+# 看图片处理流程（视觉模型预处理）
+grep -E "image saved|Preprocessing|Vision analysis" ~/self/nanoclaw/logs/nanoclaw.log | tail -20
+
+# 看 LLM API 调用和网络问题
+grep -E "proxy|Connection error|LLM API" ~/self/nanoclaw/logs/nanoclaw.log | tail -20
+
+# 查看最近一次容器的完整运行日志
+ls -lt ~/self/nanoclaw/groups/whatsapp_main/logs/ | head -5
+# 然后 cat 最新的文件，例如：
+# cat ~/self/nanoclaw/groups/whatsapp_main/logs/container-2026-03-07T06-28-39-587Z.log
+
+# 实时监控（结合多个关键词）
+tail -f ~/self/nanoclaw/logs/nanoclaw.log | grep -E "Incoming|Agent output|ERROR|image saved"
+```
+
+日志字段说明：
+- `chatJid` - 聊天 ID
+- `sender` - 发送者
+- `content` - 消息内容（前200字符）
+- `fromMe` - 是否是自己发的消息
+- `group` - 所属群组名称
+
 ## 架构
 
 ```
@@ -132,11 +242,15 @@ MODEL_NAME=compass-max
 - `gemini-2.5-pro` - Google 模型
 - 更多模型见 `https://compass.llm.shopee.io/compass-api/v1/models`
 
-## 多 Persona（多模型切换）
+## 多 Agent 配置
 
-支持在同一个聊天中通过不同触发词使用不同的 LLM 模型。每个 persona 有独立的名字和模型。
+NanoClaw 支持三种方式运行多个 Agent，按复杂度递增排列。
 
-### 配置
+### 方式 A：Personas（同一个 Bot，多个身份/模型）
+
+在同一个聊天中通过不同触发词使用不同的 LLM 模型。每个 persona 有独立的名字和模型。共享同一个群组目录和聊天上下文。
+
+#### 配置
 
 在 `.env` 中添加 `PERSONAS`：
 
@@ -149,7 +263,7 @@ PERSONAS=Andy:compass-max,Mark:QwQ-32B,Code:codecompass
 - 第一个 persona 为默认（用于自聊等不需要触发词的场景）
 - 不配置 PERSONAS 时行为和原来完全一样（向后兼容）
 
-### 使用方式
+#### 使用方式
 
 在聊天群里说：
 > @Andy 帮我写一份项目总结
@@ -166,7 +280,7 @@ Mark 使用 QwQ-32B（推理模型）处理。
 
 Code 使用 codecompass（代码模型）处理。
 
-### 可用模型
+#### 可用模型
 
 | 模型名 | RPM | 适合场景 |
 |--------|-----|---------|
@@ -179,13 +293,13 @@ Code 使用 codecompass（代码模型）处理。
 | Qwen2.5-Coder-14B-Instruct | 30 | 代码 |
 | compass | 10 | 轻量 |
 
-### 注意事项
+#### 注意事项
 
 - 自聊模式（不需要触发词）默认使用第一个 persona（Andy:compass-max）
 - 每个 persona 共享同一个群组和工作目录，只是模型不同
 - 修改 PERSONAS 后需要重启服务生效
 
-### 群聊里为什么没提醒我（触发词在结尾）
+#### 群聊里为什么没提醒我（触发词在结尾）
 
 在**群聊**中，只有**消息开头**带 @Andy 才会触发 Agent。例如：
 - 会触发：`@Andy 十分钟后提醒我`
@@ -198,6 +312,55 @@ Code 使用 codecompass（代码模型）处理。
 TRIGGER_ANYWHERE=true
 ```
 重启后，`十分钟后提醒我@Andy` 在群里也会被处理。
+
+### 方式 B：多渠道（不同平台各自一个 Bot）
+
+在 WhatsApp、Telegram、Slack、Discord 等多个平台上各运行一个独立 Bot。每个渠道有自己的群组注册、触发词和会话上下文。
+
+安装渠道：
+
+```bash
+# 添加 Telegram
+npx tsx scripts/apply-skill.ts .claude/skills/add-telegram && npm run build
+
+# 添加 Slack
+npx tsx scripts/apply-skill.ts .claude/skills/add-slack && npm run build
+
+# 添加 Discord
+npx tsx scripts/apply-skill.ts .claude/skills/add-discord && npm run build
+```
+
+每个渠道的详细配置见本文后面的「聊天渠道配置」章节。
+
+多渠道 + Personas 可以组合使用。例如 WhatsApp 上有 Andy 和 Mark，Telegram 上也有同样的两个 persona。
+
+### 方式 C：Telegram Agent Swarm（子代理池）
+
+在 Telegram 群组中创建多个 Bot 身份，主 Bot 接收消息后分派给子 Bot 执行，每个子 Bot 以自己的名义回复。适合需要多个 Agent 身份同时工作的场景。
+
+前置条件：已安装 Telegram 渠道（方式 B）。
+
+```bash
+# 安装 Swarm 支持
+npx tsx scripts/apply-skill.ts .claude/skills/add-telegram-swarm && npm run build
+```
+
+Swarm 模式下：
+- 主 Bot 负责接收和路由消息
+- Pool Bot（子代理）各有独立的 Telegram Bot Token 和名称
+- 每个子代理可以绑定不同的 LLM 模型
+- 子代理以自己的 Bot 身份在群里发消息
+
+### 三种方式对比
+
+| 特性 | Personas | 多渠道 | Telegram Swarm |
+|------|----------|--------|---------------|
+| 同一聊天多身份 | Yes | No | Yes |
+| 跨平台 | No | Yes | No（仅 Telegram） |
+| 独立 Bot Token | No | Yes | Yes |
+| 共享群组目录 | Yes | No | 部分共享 |
+| 配置复杂度 | 低 | 中 | 高 |
+| 适合场景 | 个人多模型切换 | 多平台覆盖 | 团队多代理协作 |
 
 ## 海南航空特价机票提醒（Skill）
 

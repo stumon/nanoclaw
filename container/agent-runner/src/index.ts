@@ -17,7 +17,7 @@ import path from 'path';
 import { execSync, spawn, ChildProcess } from 'child_process';
 import { fileURLToPath } from 'url';
 import OpenAI from 'openai';
-import type { ChatCompletionMessageParam, ChatCompletionTool, ChatCompletionMessageToolCall } from 'openai/resources/chat/completions';
+import type { ChatCompletionMessageParam, ChatCompletionContentPart, ChatCompletionTool, ChatCompletionMessageToolCall } from 'openai/resources/chat/completions';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -544,18 +544,33 @@ async function runAgentLoop(
     iterations++;
     log(`Agent iteration ${iterations}, messages: ${messages.length}`);
 
-    let response;
-    try {
-      response = await client.chat.completions.create({
-        model: modelName,
-        messages,
-        tools: tools.length > 0 ? tools : undefined,
-        max_tokens: 8192,
-      });
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      log(`API error: ${errMsg}`);
-      return `Error calling LLM API: ${errMsg}`;
+    let response: OpenAI.Chat.Completions.ChatCompletion | undefined;
+    const maxRetries = 3;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        response = await client.chat.completions.create({
+          model: modelName,
+          messages,
+          tools: tools.length > 0 ? tools : undefined,
+          max_tokens: 8192,
+        });
+        break;
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const isRetryable = /connect|network|timeout|econnre|socket|fetch failed/i.test(errMsg);
+        if (isRetryable && attempt < maxRetries) {
+          log(`API error (attempt ${attempt}/${maxRetries}), retrying in 3s: ${errMsg}`);
+          await new Promise(r => setTimeout(r, 3000));
+          continue;
+        }
+        log(`API error (attempt ${attempt}/${maxRetries}): ${errMsg}`);
+        return `Error calling LLM API: ${errMsg}`;
+      }
+    }
+
+    if (!response) {
+      log('All retry attempts exhausted with no response');
+      return 'Error calling LLM API: all retries failed';
     }
 
     const choice = response.choices[0];
@@ -619,6 +634,128 @@ async function runAgentLoop(
   return 'I reached the maximum number of tool iterations. Here is what I accomplished so far.';
 }
 
+// ─── Multimodal (Vision) Support ─────────────────────────────────────────────
+
+const IMAGE_TAG_RE = /\[Image:\s*([^\]]+)\]/g;
+
+function loadImageAsBase64(relativePath: string): { base64: string; mime: string } | null {
+  const absPath = path.isAbsolute(relativePath)
+    ? relativePath
+    : path.resolve(CWD, relativePath);
+  try {
+    const buf = fs.readFileSync(absPath);
+    const ext = path.extname(absPath).toLowerCase();
+    const mimeMap: Record<string, string> = {
+      '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+      '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp',
+    };
+    log(`Loaded image: ${absPath} (${buf.length} bytes)`);
+    return { base64: buf.toString('base64'), mime: mimeMap[ext] || 'image/jpeg' };
+  } catch (err) {
+    log(`Failed to load image ${absPath}: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+let _visionClient: OpenAI | null = null;
+let _visionModel: string = '';
+
+function getVisionConfig(secrets: Record<string, string>): { client: OpenAI; model: string } | null {
+  const model = secrets.VISION_MODEL || process.env.VISION_MODEL;
+  if (!model) return null;
+  if (_visionClient && _visionModel === model) return { client: _visionClient, model };
+  const apiKey = secrets.OPENAI_API_KEY || process.env.OPENAI_API_KEY;
+  const baseURL = secrets.OPENAI_BASE_URL || process.env.OPENAI_BASE_URL;
+  if (!apiKey) return null;
+  _visionClient = new OpenAI({ apiKey, baseURL: baseURL || undefined });
+  _visionModel = model;
+  return { client: _visionClient, model };
+}
+
+async function analyzeImageWithVL(
+  visionClient: OpenAI,
+  visionModel: string,
+  base64: string,
+  mime: string,
+): Promise<string> {
+  try {
+    const res = await visionClient.chat.completions.create({
+      model: visionModel,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: '请详细分析这张金融/券商APP截图。列出所有可见的持仓信息，包括：平台名称、每只股票/基金的名称、持仓数量、当前价格/市值、现金余额。用结构化格式输出，尽量精确。',
+          },
+          { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } },
+        ],
+      }],
+      max_tokens: 2000,
+    });
+    return res.choices[0]?.message?.content || '[Image analysis returned empty]';
+  } catch (err) {
+    log(`Vision analysis error: ${err instanceof Error ? err.message : String(err)}`);
+    return `[Image analysis failed: ${err instanceof Error ? err.message : String(err)}]`;
+  }
+}
+
+async function parseMultimodalContent(
+  text: string,
+  secrets: Record<string, string>,
+): Promise<ChatCompletionContentPart[] | string> {
+  const matches = [...text.matchAll(IMAGE_TAG_RE)];
+  if (matches.length === 0) return text;
+
+  // If a dedicated vision model is configured, use it to pre-analyze images
+  // and return text-only content (for models that don't support vision natively)
+  const visionCfg = getVisionConfig(secrets);
+  if (visionCfg) {
+    log(`Using vision model ${visionCfg.model} to analyze ${matches.length} image(s)`);
+    let result = text;
+    for (const match of matches) {
+      const relativePath = match[1].trim();
+      const img = loadImageAsBase64(relativePath);
+      if (img) {
+        const analysis = await analyzeImageWithVL(visionCfg.client, visionCfg.model, img.base64, img.mime);
+        result = result.replace(match[0], `[Screenshot Analysis - ${relativePath}]:\n${analysis}\n[End Analysis]`);
+        log(`Vision analysis done for ${relativePath} (${analysis.length} chars)`);
+      } else {
+        result = result.replace(match[0], `[Image not found: ${relativePath}]`);
+      }
+    }
+    return result;
+  }
+
+  // Fallback: embed images directly as multimodal content (requires vision-capable main model)
+  const parts: ChatCompletionContentPart[] = [];
+  let lastIndex = 0;
+
+  for (const match of matches) {
+    const before = text.slice(lastIndex, match.index);
+    if (before.trim()) {
+      parts.push({ type: 'text', text: before.trim() });
+    }
+
+    const relativePath = match[1].trim();
+    const img = loadImageAsBase64(relativePath);
+    if (img) {
+      parts.push({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.base64}` } });
+    } else {
+      parts.push({ type: 'text', text: `[Image not found: ${relativePath}]` });
+    }
+
+    lastIndex = (match.index || 0) + match[0].length;
+  }
+
+  const after = text.slice(lastIndex);
+  if (after.trim()) {
+    parts.push({ type: 'text', text: after.trim() });
+  }
+
+  return parts.length === 1 && parts[0].type === 'text' ? (parts[0] as { type: 'text'; text: string }).text : parts;
+}
+
 // ─── Run Query ───────────────────────────────────────────────────────────────
 
 async function runQuery(
@@ -646,8 +783,9 @@ async function runQuery(
   };
   setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
 
-  // Add user message
-  conversationHistory.push({ role: 'user', content: prompt });
+  // Add user message (with vision support for embedded images)
+  const parsedContent = await parseMultimodalContent(prompt, containerInput.secrets || {});
+  conversationHistory.push({ role: 'user', content: parsedContent as any });
 
   // Build messages for API call (system + conversation history)
   const apiMessages: ChatCompletionMessageParam[] = [
@@ -713,6 +851,10 @@ async function main(): Promise<void> {
   const apiKey = secrets.OPENAI_API_KEY || process.env.OPENAI_API_KEY;
   const baseURL = secrets.OPENAI_BASE_URL || process.env.OPENAI_BASE_URL;
   const modelName = secrets.MODEL_NAME || process.env.MODEL_NAME || 'gpt-4o';
+
+  // Export non-secret app credentials so Bash tools (e.g. update-lark-assets.ts) can read them
+  if (secrets.APPID) process.env.APPID = secrets.APPID;
+  if (secrets.APPSecret) process.env.APPSecret = secrets.APPSecret;
 
   if (!apiKey) {
     writeOutput({ status: 'error', result: null, error: 'OPENAI_API_KEY not configured' });

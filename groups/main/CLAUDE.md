@@ -247,6 +247,88 @@ The task will run in that group's context with access to their files and memory.
 
 ---
 
+## 飞书资产更新
+
+用户可以通过发送截图来更新飞书多维表格中的个人资产数据。Token 自动获取，用户无需手动提供。
+
+### 触发词
+
+「更新资产」「更新持仓」「更新飞书资产」
+
+### 对话流程
+
+1. 用户说「更新资产」→ 回复：「好的，请依次发送券商/基金APP截图，发送完毕后说「结束发送」」
+2. 用户陆续发送截图（图片消息会以 `[Image: media/xxx.jpg]` 出现）
+3. 用户说「结束发送」→ 开始处理
+
+### 处理步骤
+
+1. 收集对话中所有 `[Image: media/...]` 图片
+2. 用视觉能力逐一分析每张截图，提取持仓数据
+3. 自动识别平台：
+   - 中国银河证券、华泰证券、川财证券 → A股/场内基金，mode: replace
+   - 盈透证券(IBKR) → 美股，mode: replace（价格单位 USD，priceCNY = priceUSD * 7.0）
+   - 支付宝 → 余额宝（货币基金）+ 基金，mode: upsert
+   - 云闪付 → 各银行余额汇总为一条现金记录，mode: upsert
+   - 招商银行 → 基金，mode: upsert
+4. 构造 JSON 并调用更新脚本（token 自动从环境变量 APPID/APPSecret 获取）：
+
+```bash
+npx tsx /workspace/project/scripts/update-lark-assets.ts --data 'JSON_HERE'
+```
+
+### JSON 数据格式
+
+```json
+{
+  "platforms": [
+    {
+      "name": "中国银河证券",
+      "mode": "replace",
+      "holdings": [
+        { "asset": "中国平安", "assetType": "A股", "quantity": 1100, "priceCNY": 65.29 },
+        { "asset": "黄金ETF", "assetType": "场内基金", "quantity": 5000, "priceCNY": 10.575 }
+      ],
+      "cash": 49545.98
+    },
+    {
+      "name": "盈透证券",
+      "mode": "replace",
+      "holdings": [
+        { "asset": "META", "assetType": "美股", "quantity": 2, "priceCNY": 4647.86 }
+      ],
+      "cash": 1800,
+      "cashCurrency": "USD",
+      "cashRate": 7.0
+    },
+    {
+      "name": "支付宝",
+      "mode": "upsert",
+      "holdings": [
+        { "asset": "余额宝", "assetType": "货币基金", "quantity": 2904.73, "priceCNY": 1.0 },
+        { "asset": "基金组合", "assetType": "基金", "quantity": 48635.69, "priceCNY": 1.0 }
+      ]
+    }
+  ]
+}
+```
+
+### 字段说明
+
+飞书表字段：`平台`、`资产`、`资产类型`、`持仓数量`、`价格-CNY`
+
+资产类型取值：A股、场内基金、美股、基金、货币基金、现金
+
+### 注意事项
+
+- token 通过 APPID/APPSecret 自动获取 tenant_access_token，无需用户提供
+- replace 模式会先删除该平台所有旧记录再创建新记录
+- upsert 模式会查找已有记录并更新，找不到则创建
+- 美股价格需要乘以汇率（默认 7.0）转换为 CNY
+- 处理完毕后告知用户更新了哪些平台、多少条记录
+
+---
+
 ## 海南航空机票查询控制
 
 宿主机上有一个每小时自动运行的海南航空特价机票扫描脚本。通过写入配置文件来控制查询参数和开关。

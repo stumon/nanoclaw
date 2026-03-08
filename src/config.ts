@@ -67,8 +67,7 @@ function escapeRegex(str: string): string {
 
 // --- Persona system ---
 // Format: PERSONAS=Andy:compass-max,Mark:QwQ-32B,Code:codecompass
-const defaultModel =
-  process.env.MODEL_NAME || envConfig.MODEL_NAME || 'gpt-4o';
+const defaultModel = process.env.MODEL_NAME || envConfig.MODEL_NAME || 'gpt-4o';
 
 function parsePersonas(raw: string | undefined): Persona[] {
   if (!raw) return [];
@@ -98,17 +97,18 @@ export const PERSONAS: Persona[] = parsePersonas(personasRaw);
 export const DEFAULT_PERSONA: Persona =
   PERSONAS.length > 0
     ? PERSONAS[0]
-    : { name: ASSISTANT_NAME, trigger: new RegExp(`^@${escapeRegex(ASSISTANT_NAME)}\\b`, 'i'), model: defaultModel };
+    : {
+        name: ASSISTANT_NAME,
+        trigger: new RegExp(`^@${escapeRegex(ASSISTANT_NAME)}\\b`, 'i'),
+        model: defaultModel,
+      };
 
 // Trigger pattern matches ANY persona name (or just ASSISTANT_NAME if no personas configured)
 const allNames =
   PERSONAS.length > 0
     ? PERSONAS.map((p) => escapeRegex(p.name))
     : [escapeRegex(ASSISTANT_NAME)];
-export const TRIGGER_PATTERN = new RegExp(
-  `^@(${allNames.join('|')})\\b`,
-  'i',
-);
+export const TRIGGER_PATTERN = new RegExp(`^@(${allNames.join('|')})\\b`, 'i');
 
 /** When true, group messages trigger if they contain @Name anywhere (e.g. "十分钟后提醒我@Andy"). */
 export const TRIGGER_ANYWHERE =

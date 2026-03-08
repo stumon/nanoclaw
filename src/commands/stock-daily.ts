@@ -17,6 +17,7 @@ export function isStockDailyRerunCommand(raw: string): boolean {
     .replace(/[，。！？!?,.]/g, '')
     .trim();
   if (!loose) return false;
-  return /重跑|重新跑|再跑/.test(loose) && /股票/.test(loose) && /数据/.test(loose);
+  return (
+    /重跑|重新跑|再跑/.test(loose) && /股票/.test(loose) && /数据/.test(loose)
+  );
 }
-

@@ -24,6 +24,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { validateAdditionalMounts } from './mount-security.js';
+import { proxyBaseUrl } from './api-proxy.js';
 import { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -53,6 +54,25 @@ interface VolumeMount {
   hostPath: string;
   containerPath: string;
   readonly: boolean;
+}
+
+/**
+ * Recursively sync skill directories (folders containing SKILL.md) from src to dst.
+ * Handles nested structures like ~/.cursor/skills/superpowers/skills/<name>/SKILL.md
+ */
+function syncSkillsRecursive(srcRoot: string, dstRoot: string): void {
+  if (!fs.existsSync(srcRoot)) return;
+  for (const entry of fs.readdirSync(srcRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const srcDir = path.join(srcRoot, entry.name);
+    const skillFile = path.join(srcDir, 'SKILL.md');
+    if (fs.existsSync(skillFile)) {
+      const dstDir = path.join(dstRoot, entry.name);
+      fs.cpSync(srcDir, dstDir, { recursive: true });
+    } else {
+      syncSkillsRecursive(srcDir, dstRoot);
+    }
+  }
 }
 
 function buildVolumeMounts(
@@ -134,16 +154,12 @@ function buildVolumeMounts(
     );
   }
 
-  // Sync skills from container/skills/ into each group's .claude/skills/
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+  // Sync all skills from project .claude/skills/ into the container's .claude/skills/
+  // All skills are maintained in one place: <project>/.claude/skills/
   const skillsDst = path.join(groupSessionsDir, 'skills');
+  const skillsSrc = path.join(process.cwd(), '.claude', 'skills');
   if (fs.existsSync(skillsSrc)) {
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.cpSync(srcDir, dstDir, { recursive: true });
-    }
+    syncSkillsRecursive(skillsSrc, skillsDst);
   }
   mounts.push({
     hostPath: groupSessionsDir,
@@ -178,7 +194,7 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
+  if (fs.existsSync(agentRunnerSrc)) {
     fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
   }
   mounts.push({
@@ -201,19 +217,13 @@ function buildVolumeMounts(
 }
 
 /**
- * Read allowed secrets from .env for passing to the container via stdin.
+ * Read all secrets from .env for passing to the container via stdin.
+ * All key=value pairs in .env are passed — no whitelist needed.
+ * Add new secrets to .env with comments to keep them organized.
  * Secrets are never written to disk or mounted as files.
  */
 function readSecrets(): Record<string, string> {
-  return readEnvFile([
-    'CLAUDE_CODE_OAUTH_TOKEN',
-    'ANTHROPIC_API_KEY',
-    'ANTHROPIC_BASE_URL',
-    'ANTHROPIC_AUTH_TOKEN',
-    'OPENAI_API_KEY',
-    'OPENAI_BASE_URL',
-    'MODEL_NAME',
-  ]);
+  return readEnvFile();
 }
 
 function buildContainerArgs(
@@ -225,6 +235,9 @@ function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Prefer IPv4 DNS to avoid HTTPS timeouts with IPv6 NAT on Apple Container
+  args.push('-e', 'NODE_OPTIONS=--dns-result-order=ipv4first');
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),
@@ -314,6 +327,14 @@ export async function runContainerAgent(
     input.secrets = readSecrets();
     if (input.modelOverride) {
       input.secrets.MODEL_NAME = input.modelOverride;
+    }
+    // Route LLM API calls through the host-side proxy so containers
+    // don't need direct internet access (works behind VPN / firewalls).
+    if (input.secrets.OPENAI_BASE_URL) {
+      input.secrets.OPENAI_BASE_URL = proxyBaseUrl(input.secrets.OPENAI_BASE_URL);
+    }
+    if (input.secrets.ANTHROPIC_BASE_URL) {
+      input.secrets.ANTHROPIC_BASE_URL = proxyBaseUrl(input.secrets.ANTHROPIC_BASE_URL);
     }
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();

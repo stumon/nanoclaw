@@ -22,6 +22,8 @@ import {
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
+import { startApiProxy } from './api-proxy.js';
+import { readEnvFile } from './env.js';
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
@@ -45,6 +47,7 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
+import { preprocessImageTags } from './vision-preprocessor.js';
 import {
   isSenderAllowed,
   isTriggerAllowed,
@@ -55,6 +58,15 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 import { isStockDailyRerunCommand } from './commands/stock-daily.js';
+import {
+  isAssetTrigger,
+  isEndTrigger,
+  hasActiveSession,
+  startSession,
+  addImage,
+  getSessionImageCount,
+  processAssetUpdate,
+} from './asset-update-handler.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -141,6 +153,114 @@ export function _setRegisteredGroups(
   registeredGroups = groups;
 }
 
+const IMAGE_TAG_RE = /\[Image:\s*([^\]]+)\]/;
+
+/**
+ * Handle asset-update messages on the host side (no container needed).
+ * Returns true if the messages were consumed and should NOT go to a container.
+ */
+async function handleAssetMessages(
+  chatJid: string,
+  messages: NewMessage[],
+  channel: Channel,
+  group: RegisteredGroup,
+): Promise<boolean> {
+  const groupDir = resolveGroupFolderPath(group.folder);
+  const hasAssetTrigger = messages.some((m) => isAssetTrigger(m.content));
+  const hasEnd = messages.some((m) => isEndTrigger(m.content));
+  const imageMessages = messages.filter((m) => IMAGE_TAG_RE.test(m.content));
+
+  // Start a new session
+  if (hasAssetTrigger && !hasActiveSession(chatJid)) {
+    startSession(chatJid);
+    await channel.sendMessage(
+      chatJid,
+      '好的，请依次发送券商/基金APP截图，发送完毕后说「结束发送」',
+    );
+
+    // If images came in the same batch, add them
+    for (const m of imageMessages) {
+      const match = m.content.match(IMAGE_TAG_RE);
+      if (match) {
+        const absPath = path.resolve(groupDir, match[1].trim());
+        const rel = path.relative(groupDir, absPath);
+        if (rel.startsWith('..') || path.isAbsolute(rel)) continue;
+        addImage(chatJid, absPath);
+      }
+    }
+
+    // Advance cursor
+    lastAgentTimestamp[chatJid] =
+      messages[messages.length - 1].timestamp;
+    saveState();
+
+    // If "结束发送" also in same batch
+    if (hasEnd) {
+      if (getSessionImageCount(chatJid) === 0) {
+        logger.info({ chatJid }, 'End trigger in start batch but no images, waiting 12s');
+        await new Promise((r) => setTimeout(r, 12_000));
+      }
+      if (getSessionImageCount(chatJid) > 0) {
+        await channel.setTyping?.(chatJid, true);
+        await channel.sendMessage(chatJid, '正在分析截图并更新飞书...');
+        const result = await processAssetUpdate(chatJid);
+        await channel.setTyping?.(chatJid, false);
+        await channel.sendMessage(chatJid, result);
+      }
+    }
+
+    return true;
+  }
+
+  // Active session: collect images and/or process end
+  if (hasActiveSession(chatJid)) {
+    for (const m of imageMessages) {
+      const match = m.content.match(IMAGE_TAG_RE);
+      if (match) {
+        const absPath = path.resolve(groupDir, match[1].trim());
+        const rel = path.relative(groupDir, absPath);
+        if (rel.startsWith('..') || path.isAbsolute(rel)) continue;
+        addImage(chatJid, absPath);
+      }
+    }
+
+    // Advance cursor
+    lastAgentTimestamp[chatJid] =
+      messages[messages.length - 1].timestamp;
+    saveState();
+
+    if (hasEnd) {
+      // Race-condition guard: if no images yet, wait for upload to finish
+      if (getSessionImageCount(chatJid) === 0) {
+        logger.info({ chatJid }, 'End trigger received but no images yet, waiting 12s for uploads');
+        await new Promise((r) => setTimeout(r, 12_000));
+      }
+
+      if (getSessionImageCount(chatJid) === 0) {
+        await channel.sendMessage(
+          chatJid,
+          '还没有收到截图，请先发送截图再说「结束发送」',
+        );
+      } else {
+        await channel.setTyping?.(chatJid, true);
+        await channel.sendMessage(chatJid, '正在分析截图并更新飞书...');
+        const result = await processAssetUpdate(chatJid);
+        await channel.setTyping?.(chatJid, false);
+        await channel.sendMessage(chatJid, result);
+      }
+    } else if (imageMessages.length > 0) {
+      await channel.sendMessage(
+        chatJid,
+        `收到 ${imageMessages.length} 张截图，继续发送或说「结束发送」`,
+      );
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -177,6 +297,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
+  // ── Asset update interception (host-side, bypasses container) ──────
+  if (isMainGroup) {
+    const handled = await handleAssetMessages(
+      chatJid,
+      missedMessages,
+      channel,
+      group,
+    );
+    if (handled) return true;
+  }
+
   // Main group admin command: rerun today's stock data push.
   // Keep it strict to avoid accidentally executing host scripts from normal chat.
   if (isMainGroup && missedMessages.length === 1) {
@@ -211,7 +342,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           '收到，开始重跑今日股票数据。完成后我会回一条结果。',
         );
 
-        const scriptPath = path.resolve(process.cwd(), 'scripts/stock-daily-push.sh');
+        const scriptPath = path.resolve(
+          process.cwd(),
+          'scripts/stock-daily-push.sh',
+        );
         stockDailyRunByChat.set(chatJid, { startedAt: Date.now() });
 
         const proc = spawn('bash', [scriptPath], {
@@ -260,7 +394,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               );
             }
           } catch (err) {
-            logger.warn({ err, chatJid }, 'Failed to report stock rerun result');
+            logger.warn(
+              { err, chatJid },
+              'Failed to report stock rerun result',
+            );
           }
         });
 
@@ -301,7 +438,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
-  const prompt = formatMessages(missedMessages);
+  let prompt = formatMessages(missedMessages);
+
+  // Pre-analyze images on the host (direct API access, no proxy needed)
+  const groupDir = resolveGroupFolderPath(group.folder);
+  prompt = await preprocessImageTags(prompt, groupDir);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -311,7 +452,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length, persona: persona.name, model: persona.model },
+    {
+      group: group.name,
+      messageCount: missedMessages.length,
+      persona: persona.name,
+      model: persona.model,
+    },
     'Processing messages',
   );
 
@@ -333,32 +479,41 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, persona, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
-      if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+  const output = await runAgent(
+    group,
+    prompt,
+    chatJid,
+    persona,
+    async (result) => {
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.info(
+          { group: group.name },
+          `Agent output: ${raw.slice(0, 200)}`,
+        );
+        if (text) {
+          await channel.sendMessage(chatJid, text);
+          outputSentToUser = true;
+        }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+      if (result.status === 'success') {
+        queue.notifyIdle(chatJid);
+      }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
+      if (result.status === 'error') {
+        hadError = true;
+      }
+    },
+  );
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
@@ -532,6 +687,24 @@ async function startMessageLoop(): Promise<void> {
             if (!hasTrigger) continue;
           }
 
+          // ── Asset update interception in message loop ─────────────
+          if (isMainGroup) {
+            const allPendingForAsset = getMessagesSince(
+              chatJid,
+              lastAgentTimestamp[chatJid] || '',
+              ASSISTANT_NAME,
+            );
+            const msgsForCheck =
+              allPendingForAsset.length > 0 ? allPendingForAsset : groupMessages;
+            const handled = await handleAssetMessages(
+              chatJid,
+              msgsForCheck,
+              channel,
+              group,
+            );
+            if (handled) continue;
+          }
+
           // Pull all messages since lastAgentTimestamp so non-trigger
           // context that accumulated between triggers is included.
           const allPending = getMessagesSince(
@@ -541,7 +714,11 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend);
+          let formatted = formatMessages(messagesToSend);
+
+          // Pre-analyze images on the host before piping to container
+          const ipcGroupDir = resolveGroupFolderPath(group.folder);
+          formatted = await preprocessImageTags(formatted, ipcGroupDir);
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(
@@ -595,6 +772,13 @@ function ensureContainerSystemRunning(): void {
 
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
+
+  // Start LLM API proxy on the container bridge so containers can
+  // reach the API through the host (bypasses VPN / firewall issues).
+  const apiEnv = readEnvFile(['OPENAI_BASE_URL', 'ANTHROPIC_BASE_URL']);
+  const baseUrl = apiEnv.OPENAI_BASE_URL || apiEnv.ANTHROPIC_BASE_URL;
+  if (baseUrl) startApiProxy(new URL(baseUrl).origin);
+
   initDatabase();
   logger.info('Database initialized');
   loadState();
@@ -628,6 +812,10 @@ async function main(): Promise<void> {
           return;
         }
       }
+      logger.info(
+        { chatJid, sender: msg.sender_name, content: msg.content.slice(0, 200), fromMe: msg.is_from_me },
+        'Incoming message',
+      );
       storeMessage(msg);
     },
     onChatMetadata: (

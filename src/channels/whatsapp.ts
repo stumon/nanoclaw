@@ -2,10 +2,13 @@ import { exec } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
+import crypto from 'crypto';
+
 import makeWASocket, {
   Browsers,
   DisconnectReason,
   WASocket,
+  downloadMediaMessage,
   fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   normalizeMessageContent,
@@ -15,6 +18,7 @@ import makeWASocket, {
 import {
   ASSISTANT_HAS_OWN_NUMBER,
   ASSISTANT_NAME,
+  GROUPS_DIR,
   STORE_DIR,
 } from '../config.js';
 import { getLastGroupSync, setLastGroupSync, updateChatName } from '../db.js';
@@ -203,12 +207,58 @@ export class WhatsAppChannel implements Channel {
           // Only deliver full message for registered groups
           const groups = this.opts.registeredGroups();
           if (groups[chatJid]) {
-            const content =
+            // Download image/document if present and save to group media folder
+            let imageTag = '';
+            const isImage = !!normalized.imageMessage;
+            const isDocImage = !!(
+              normalized.documentMessage &&
+              normalized.documentMessage.mimetype?.startsWith('image/')
+            );
+
+            if (isImage || isDocImage) {
+              try {
+                const buffer = (await downloadMediaMessage(
+                  msg,
+                  'buffer',
+                  {},
+                  {
+                    logger: logger as any,
+                    reuploadRequest: this.sock.updateMediaMessage,
+                  },
+                )) as Buffer;
+
+                if (buffer && buffer.length > 0) {
+                  const groupFolder = groups[chatJid].folder;
+                  const mediaDir = path.join(GROUPS_DIR, groupFolder, 'media');
+                  fs.mkdirSync(mediaDir, { recursive: true });
+                  const ext = isDocImage
+                    ? (normalized.documentMessage!.fileName?.split('.').pop() || 'jpg')
+                    : 'jpg';
+                  const filename = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
+                  const filePath = path.join(mediaDir, filename);
+                  fs.writeFileSync(filePath, buffer);
+                  imageTag = `[Image: media/${filename}]`;
+                  logger.info(
+                    { chatJid, filename, size: buffer.length, type: isDocImage ? 'document' : 'image' },
+                    'WhatsApp image saved',
+                  );
+                }
+              } catch (err) {
+                logger.warn({ chatJid, err }, 'Failed to download WhatsApp image');
+              }
+            }
+
+            const textContent =
               normalized.conversation ||
               normalized.extendedTextMessage?.text ||
               normalized.imageMessage?.caption ||
               normalized.videoMessage?.caption ||
+              normalized.documentMessage?.caption ||
               '';
+
+            const content = imageTag
+              ? (textContent ? `${imageTag}\n${textContent}` : imageTag)
+              : textContent;
 
             // Skip protocol messages with no text content (encryption keys, read receipts, etc.)
             if (!content) continue;
