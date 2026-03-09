@@ -174,13 +174,85 @@ This allows you to use:
 
 Note: The model must support the Anthropic API format for best compatibility.
 
+**What timezone are schedules and logs in?**
+
+All scheduled tasks (cron, launchd StartCalendarInterval), task run times, and log rollover use **Beijing time** (Asia/Shanghai) by default. Set `TZ=Asia/Shanghai` in `.env` or in your launchd plist; the codebase default is `Asia/Shanghai` when `TZ` is unset.
+
 **How do I debug issues?**
 
 Ask Claude Code. "Why isn't the scheduler running?" "What's in the recent logs?" "Why did this message not get a response?" That's the AI-native approach that underlies NanoClaw.
 
+You can also inspect containers directly:
+
+```bash
+container ls                            # List running containers
+container exec -it <container-id> bash  # Enter a running container
+container logs <container-id>           # View container logs
+```
+
 **Why isn't the setup working for me?**
 
 If you have issues, during setup, Claude will try to dynamically fix them. If that doesn't work, run `claude`, then run `/debug`. If Claude finds an issue that is likely affecting other users, open a PR to modify the setup SKILL.md.
+
+**Container can't reach the internet (Apple Container networking)?**
+
+Apple Container's NAT only allows containers to reach the host gateway (`192.168.64.1`). Direct connections to public IPs will time out. This also causes `apt-get update` failures during `container build --no-cache`.
+
+NanoClaw works around this with an HTTP reverse proxy on `192.168.64.1:8462` (`src/api-proxy.ts`). All external API calls from containers are routed through the host:
+
+- LLM API calls go through the default route
+- Tavily search goes through `/__tavily/` prefix
+- `container-runner.ts` automatically rewrites `OPENAI_BASE_URL` to the proxy address
+
+No manual configuration needed — it works out of the box as long as NanoClaw is running.
+
+**LLM API requires VPN but containers can't use host VPN?**
+
+Containers run in an isolated Linux VM without access to the host's VPN routes. If your LLM API (e.g. `compass.llm.shopee.io`) requires VPN, containers can't reach it directly.
+
+The same reverse proxy solves this: set `OPENAI_BASE_URL` in `.env` to your VPN-only endpoint. NanoClaw rewrites the URL to route through the host proxy, which has VPN access. The container never needs to connect directly.
+
+**How do I make a group reply to every message without @Andy (no trigger required)?**
+
+Each group has a `requiresTrigger` flag. When `true` (default), the assistant only responds when the message contains the trigger (e.g. `@Andy`). When `false`, the assistant replies to every message in that group.
+
+- **When adding a new group:** pass `--no-trigger-required` to the register step. Example (from project root):
+
+  ```bash
+  npx tsx setup/register.ts --channel whatsapp --jid 120363406615515477@g.us --name "My Group" --folder whatsapp_main --trigger "@Andy" --no-trigger-required
+  ```
+
+- **For an existing group:** update the database. Get the group JID from logs (e.g. `chatJid` in incoming message lines), then:
+
+  ```bash
+  sqlite3 store/messages.db "UPDATE registered_groups SET requires_trigger = 0 WHERE jid = 'YOUR_GROUP_JID';"
+  ```
+  Replace `YOUR_GROUP_JID` with the group JID (e.g. `120363406615515477@g.us` from logs).
+
+  Restart NanoClaw for the change to take effect (`launchctl kickstart -k gui/$(id -u)/com.nanoclaw` on macOS).
+
+**What is sender-allowlist.json and how do I configure it?**
+
+The file lives in the project root: `sender-allowlist.json`. It controls **who** can trigger the assistant in each group (when `requiresTrigger` is true). Keys are **group JIDs** (e.g. `120363406615515477@g.us`), not group names. You can find the JID in logs when a message is received (`chatJid`).
+
+- `default`: applies to any group not listed under `chats`.
+- `chats.<jid>.allow`: `"*"` = anyone can trigger; or an array of WhatsApp sender IDs, e.g. `["8613800138000@s.whatsapp.net"]`.
+- `chats.<jid>.mode`: `"trigger"` = only allowlisted senders trigger; `"drop"` = ignore messages from this group.
+
+Example (allow everyone in one group, restrict another):
+
+```json
+{
+  "default": { "allow": "*", "mode": "trigger" },
+  "chats": {
+    "120363406615515477@g.us": { "allow": "*", "mode": "trigger" },
+    "999888777666@g.us": { "allow": ["8619860743536@s.whatsapp.net"], "mode": "trigger" }
+  },
+  "logDenied": true
+}
+```
+
+If the file is missing or invalid, all senders are allowed. The file is in the project directory so you can keep config next to your code.
 
 **What changes will be accepted into the codebase?**
 

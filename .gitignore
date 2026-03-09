@@ -21,6 +21,7 @@ groups/global/*
 # Secrets
 *.keys.json
 .env
+sender-allowlist.json
 
 # Temp files
 .tmp-*

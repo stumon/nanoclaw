@@ -33,7 +33,28 @@ src/container-runner.ts               container/agent-runner/
 | **Main app logs** | `logs/nanoclaw.log` | Host-side WhatsApp, routing, container spawning |
 | **Main app errors** | `logs/nanoclaw.error.log` | Host-side errors |
 | **Container run logs** | `groups/{folder}/logs/container-*.log` | Per-run: input, mounts, stderr, stdout |
+| **Hainan Airlines** | `logs/hnair-ticket-check-YYYY-MM-DD-HH.log` | 按小时分文件，每小时一个 log |
 | **Claude sessions** | `~/.claude/projects/` | Claude Code session history |
+
+**看日志一般不需要进容器**：以上都在宿主机项目目录下，直接 `tail -f logs/nanoclaw.log` 或 `cat groups/main/logs/container-*.log` 即可。
+
+## 进容器看环境（调试用）
+
+Agent 容器是**短生命周期**的（每次处理完消息就退出并 `--rm` 删除），没有常驻容器可 `exec`。要进“和 Agent 一样的环境”只能**另起一个临时容器**开 shell：
+
+**Apple Container（macOS 默认）：**
+```bash
+cd /path/to/nanoclaw
+container run -it --rm --entrypoint /bin/sh nanoclaw-agent:latest
+```
+进入后可查看：`/workspace/`（空，因未挂载）、`/app/`、`/home/node/.claude/skills/`（空）。要挂载和正式运行一致可在本地用脚本起容器并挂载 `groups/main` 等。
+
+**Docker：**
+```bash
+docker run -it --rm --entrypoint /bin/bash nanoclaw-agent:latest
+```
+
+**若只想看某次运行的容器内输出**：不必进容器，直接看该次写入的 `groups/{folder}/logs/container-*.log`（每次 run 都会在退出时把 stdout/stderr 等写入该目录）。
 
 ## Enabling Debug Logging
 
@@ -202,8 +223,12 @@ docker run --rm --entrypoint /bin/bash \
 '
 ```
 
-### Interactive shell in container:
+### Interactive shell in container (same image, no mounts):
 ```bash
+# Apple Container (macOS)
+container run -it --rm --entrypoint /bin/sh nanoclaw-agent:latest
+
+# Docker
 docker run --rm -it --entrypoint /bin/bash nanoclaw-agent:latest
 ```
 

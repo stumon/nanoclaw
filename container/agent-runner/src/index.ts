@@ -357,7 +357,56 @@ const BUILTIN_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'WebSearch',
+      description: 'Search the web using Tavily API. Returns AI-generated answer and source links. Use for current events, news, real-time information.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query' },
+          max_results: { type: 'number', description: 'Max results (default 5)' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'FetchURL',
+      description: 'Fetch and extract the main text content from any URL. Works with WeChat articles (mp.weixin.qq.com), blogs, news sites, and most web pages. Returns the page title and article text. Use this when a user sends a URL and asks about its content.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'The URL to fetch' },
+          max_chars: { type: 'number', description: 'Maximum characters to return (default 30000)' },
+        },
+        required: ['url'],
+      },
+    },
+  },
 ];
+
+// ─── Schema Sanitizer ────────────────────────────────────────────────────────
+
+function sanitizeSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  const cleaned = { ...schema };
+  delete cleaned['default'];
+  delete cleaned['$schema'];
+  delete cleaned['additionalProperties'];
+  if (cleaned.properties && typeof cleaned.properties === 'object') {
+    const props = { ...(cleaned.properties as Record<string, unknown>) };
+    for (const [key, val] of Object.entries(props)) {
+      if (val && typeof val === 'object') {
+        props[key] = sanitizeSchema(val as Record<string, unknown>);
+      }
+    }
+    cleaned.properties = props;
+  }
+  return cleaned;
+}
 
 // ─── Tool Execution ──────────────────────────────────────────────────────────
 
@@ -373,7 +422,7 @@ function resolvePath(p: string): string {
   return path.resolve(CWD, p);
 }
 
-function executeTool(name: string, args: Record<string, unknown>): string {
+async function executeTool(name: string, args: Record<string, unknown>): Promise<string> {
   try {
     switch (name) {
       case 'Bash': {
@@ -470,6 +519,111 @@ function executeTool(name: string, args: Record<string, unknown>): string {
           return truncate(result.trim() || '(no matches)', MAX_TOOL_OUTPUT_CHARS);
         } catch {
           return '(no matches)';
+        }
+      }
+
+      case 'WebSearch': {
+        const query = args.query as string;
+        const maxResults = (args.max_results as number) || 5;
+        const apiKey = process.env.TAVILY_API_KEY;
+        if (!apiKey) return 'Error: TAVILY_API_KEY not configured';
+
+        // Derive proxy base from OPENAI_BASE_URL (already rewritten to
+        // http://192.168.64.1:8462/... by the host). The /__tavily/ prefix
+        // tells the proxy to forward to api.tavily.com.
+        const proxyOrigin = process.env.OPENAI_BASE_URL
+          ? new URL(process.env.OPENAI_BASE_URL).origin
+          : null;
+        const tavilyUrl = proxyOrigin
+          ? `${proxyOrigin}/__tavily/search`
+          : 'https://api.tavily.com/search';
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30_000);
+        try {
+          const res = await fetch(tavilyUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              query,
+              max_results: maxResults,
+              search_depth: 'advanced',
+              include_answer: true,
+              include_raw_content: false,
+            }),
+            signal: controller.signal,
+          });
+
+          if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            return `Search API error: HTTP ${res.status} ${text.slice(0, 200)}`;
+          }
+
+          const data = await res.json() as {
+            answer?: string;
+            results?: Array<{ title?: string; url?: string; content?: string }>;
+          };
+
+          const parts: string[] = [];
+          if (data.answer) {
+            parts.push('Answer:', data.answer, '');
+          }
+          parts.push('Sources:');
+          for (const r of data.results || []) {
+            parts.push(`  - ${r.title || 'No title'}`);
+            parts.push(`    ${r.url || ''}`);
+            if (r.content) parts.push(`    ${r.content.slice(0, 300)}`);
+            parts.push('');
+          }
+          return truncate(parts.join('\n'), MAX_TOOL_OUTPUT_CHARS);
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+
+      case 'FetchURL': {
+        const url = args.url as string;
+        const maxChars = (args.max_chars as number) || 30000;
+        if (!url) return 'Error: url is required';
+
+        const proxyOrigin = process.env.OPENAI_BASE_URL
+          ? new URL(process.env.OPENAI_BASE_URL).origin
+          : null;
+        const fetchEndpoint = proxyOrigin
+          ? `${proxyOrigin}/__fetch/`
+          : null;
+
+        if (!fetchEndpoint) {
+          return 'Error: FetchURL requires the host proxy (OPENAI_BASE_URL not set)';
+        }
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 35_000);
+        try {
+          const res = await fetch(fetchEndpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, maxChars }),
+            signal: controller.signal,
+          });
+
+          if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            return `FetchURL error: HTTP ${res.status} ${text.slice(0, 300)}`;
+          }
+
+          const data = await res.json() as { title?: string; content?: string; error?: string };
+          if (data.error) return `FetchURL error: ${data.error}`;
+
+          const parts: string[] = [];
+          if (data.title) parts.push(`Title: ${data.title}`, '');
+          if (data.content) parts.push(data.content);
+          return truncate(parts.join('\n') || '(empty page)', MAX_TOOL_OUTPUT_CHARS);
+        } finally {
+          clearTimeout(timeout);
         }
       }
 
@@ -609,7 +763,7 @@ async function runAgentLoop(
           }
         } else {
           log(`Executing tool: ${fnName}`);
-          result = executeTool(fnName, fnArgs);
+          result = await executeTool(fnName, fnArgs);
         }
 
         log(`Tool ${fnName} result: ${result.slice(0, 200)}${result.length > 200 ? '...' : ''}`);
@@ -852,9 +1006,11 @@ async function main(): Promise<void> {
   const baseURL = secrets.OPENAI_BASE_URL || process.env.OPENAI_BASE_URL;
   const modelName = secrets.MODEL_NAME || process.env.MODEL_NAME || 'gpt-4o';
 
-  // Export non-secret app credentials so Bash tools (e.g. update-lark-assets.ts) can read them
+  // Export credentials so Bash tools and built-in tools (WebSearch) can read them
   if (secrets.APPID) process.env.APPID = secrets.APPID;
   if (secrets.APPSecret) process.env.APPSecret = secrets.APPSecret;
+  if (secrets.TAVILY_API_KEY) process.env.TAVILY_API_KEY = secrets.TAVILY_API_KEY;
+  if (baseURL) process.env.OPENAI_BASE_URL = baseURL;
 
   if (!apiKey) {
     writeOutput({ status: 'error', result: null, error: 'OPENAI_API_KEY not configured' });
@@ -893,7 +1049,7 @@ async function main(): Promise<void> {
         function: {
           name: `mcp__nanoclaw__${tool.name}`,
           description: tool.description,
-          parameters: tool.inputSchema as Record<string, unknown>,
+          parameters: sanitizeSchema(tool.inputSchema as Record<string, unknown>),
         },
       });
     }

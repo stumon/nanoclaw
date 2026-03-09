@@ -32,6 +32,11 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 # Prefer IPv4 DNS resolution to avoid timeouts with IPv6 NAT
 ENV NODE_OPTIONS=--dns-result-order=ipv4first
 
+# Install Python3 + scrapling for web scraping skill
+RUN apt-get update && apt-get install -y python3 python3-pip \
+    && pip3 install --break-system-packages scrapling html2text \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install agent-browser globally (claude-code no longer needed)
 RUN npm install -g agent-browser
 

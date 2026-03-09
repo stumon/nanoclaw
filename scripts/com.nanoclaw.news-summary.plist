@@ -3,30 +3,35 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.nanoclaw.hnair-hourly</string>
+    <string>com.nanoclaw.news-summary</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/env</string>
         <string>npx</string>
         <string>tsx</string>
-        <string>scripts/hnair-ticket-check.ts</string>
+        <string>scripts/news-summary.ts</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/huanyu.guo/self/nanoclaw</string>
-    <key>StartInterval</key>
-    <integer>3600</integer>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>20</integer>
+    </dict>
     <key>EnvironmentVariables</key>
     <dict>
         <key>TZ</key>
         <string>Asia/Shanghai</string>
         <key>PATH</key>
-        <string>/Users/huanyu.guo/.nvm/versions/node/v24.3.0/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
         <string>/Users/huanyu.guo</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>/Users/huanyu.guo/self/nanoclaw/logs/hnair-hourly-stdout.log</string>
+    <string>/Users/huanyu.guo/self/nanoclaw/logs/news-summary-stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/huanyu.guo/self/nanoclaw/logs/hnair-hourly-stderr.log</string>
+    <string>/Users/huanyu.guo/self/nanoclaw/logs/news-summary-stderr.log</string>
 </dict>
 </plist>

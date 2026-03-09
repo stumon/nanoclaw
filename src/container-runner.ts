@@ -109,6 +109,14 @@ function buildVolumeMounts(
       readonly: false,
     });
 
+    // Project root read-only so non-main groups can access shared data
+    // (e.g. data/news-brief-*.md, scripts/)
+    mounts.push({
+      hostPath: projectRoot,
+      containerPath: '/workspace/project',
+      readonly: true,
+    });
+
     // Global memory directory (read-only for non-main)
     // Only directory mounts are supported, not file mounts
     const globalDir = path.join(GROUPS_DIR, 'global');
@@ -331,10 +339,19 @@ export async function runContainerAgent(
     // Route LLM API calls through the host-side proxy so containers
     // don't need direct internet access (works behind VPN / firewalls).
     if (input.secrets.OPENAI_BASE_URL) {
-      input.secrets.OPENAI_BASE_URL = proxyBaseUrl(input.secrets.OPENAI_BASE_URL);
+      input.secrets.OPENAI_BASE_URL = proxyBaseUrl(
+        input.secrets.OPENAI_BASE_URL,
+      );
     }
     if (input.secrets.ANTHROPIC_BASE_URL) {
-      input.secrets.ANTHROPIC_BASE_URL = proxyBaseUrl(input.secrets.ANTHROPIC_BASE_URL);
+      input.secrets.ANTHROPIC_BASE_URL = proxyBaseUrl(
+        input.secrets.ANTHROPIC_BASE_URL,
+      );
+    }
+    if (input.secrets.DEEPSEEK_BASE_URL) {
+      input.secrets.DEEPSEEK_BASE_URL = proxyBaseUrl(
+        input.secrets.DEEPSEEK_BASE_URL,
+      );
     }
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();

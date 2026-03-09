@@ -199,7 +199,7 @@ After registering a group, explain the sender allowlist feature to the user:
 >
 > For closed groups with trusted members, I recommend setting up an allow-only list so only specific people can trigger me. Want me to configure that?
 
-If the user wants to set up an allowlist, edit `~/.config/nanoclaw/sender-allowlist.json` on the host:
+If the user wants to set up an allowlist, edit `sender-allowlist.json` in the project root on the host:
 
 ```json
 {
@@ -217,7 +217,7 @@ If the user wants to set up an allowlist, edit `~/.config/nanoclaw/sender-allowl
 Notes:
 - Your own messages (`is_from_me`) explicitly bypass the allowlist in trigger checks. Bot messages are filtered out by the database query before trigger evaluation, so they never reach the allowlist.
 - If the config file doesn't exist or is invalid, all senders are allowed (fail-open)
-- The config file is on the host at `~/.config/nanoclaw/sender-allowlist.json`, not inside the container
+- The config file is in the project root on the host (`sender-allowlist.json`), not inside the container
 
 ### Removing a Group
 
@@ -244,6 +244,57 @@ When scheduling tasks for other groups, use the `target_group_jid` parameter wit
 - `schedule_task(prompt: "...", schedule_type: "cron", schedule_value: "0 9 * * 1", target_group_jid: "120363336345536173@g.us")`
 
 The task will run in that group's context with access to their files and memory.
+
+---
+
+## 每日新闻简报
+
+用户说「今日报纸」「生成今日报纸」「今日新闻」「新闻简报」等时，发送两条文字消息：先英文、再中文。
+
+### 步骤
+
+1. 读取 `/workspace/project/data/news-brief-YYYY-MM-DD.md`（替换为当天日期）。若文件不存在则用 WebSearch 按主题搜索今日要闻（每主题 4~5 条：world, business, tech）。
+2. 保留文件中全部条目（不要裁剪），补全「观点」栏（2~3 条短评）。总条目不少于 12 条。
+3. 发送英文版文字消息（用 WhatsApp 格式）：
+
+*Today's Headlines YYYY-MM-DD*
+
+*WORLD*
+• headline 1
+• headline 2
+...
+
+*BUSINESS*
+• ...
+
+*TECHNOLOGY*
+• ...
+
+*OPINION*
+• short commentary
+
+4. 将全部条目翻译成中文，发送中文版文字消息：
+
+*今日要闻 YYYY-MM-DD*
+
+*世界*
+• 标题1
+...
+
+*商业*
+• ...
+
+*科技*
+• ...
+
+*观点*
+• 短评
+
+两条消息缺一不可（先英文后中文），总条目 15~20 条。
+
+### 宿主机定时任务（每日 9:20 北京时间）
+
+已提供 `scripts/com.nanoclaw.news-summary.plist`，每天**北京时间 9:20** 自动运行 `npx tsx scripts/news-summary.ts`，写入 `data/news-brief-YYYY-MM-DD.md`。项目内所有定时与日志时间均使用**北京时区**（TZ=Asia/Shanghai）。
 
 ---
 

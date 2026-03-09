@@ -34,10 +34,8 @@ export const MOUNT_ALLOWLIST_PATH = path.join(
   'nanoclaw',
   'mount-allowlist.json',
 );
-export const SENDER_ALLOWLIST_PATH = path.join(
-  HOME_DIR,
-  '.config',
-  'nanoclaw',
+export const SENDER_ALLOWLIST_PATH = path.resolve(
+  PROJECT_ROOT,
   'sender-allowlist.json',
 );
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
@@ -146,7 +144,5 @@ export function getPersonaFromMessage(text: string): Persona | null {
   return null;
 }
 
-// Timezone for scheduled tasks (cron expressions, etc.)
-// Uses system timezone by default
-export const TIMEZONE =
-  process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+// Timezone for scheduled tasks, cron, and log timestamps. Default: Beijing.
+export const TIMEZONE = process.env.TZ || 'Asia/Shanghai';

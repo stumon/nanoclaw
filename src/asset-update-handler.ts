@@ -83,7 +83,7 @@ const VISION_PROMPT = `请逐行分析这张券商/基金APP截图中的每一�
 注意事项：
 - 名称可能以数字开头（如 500ETF、300ETF、科创50等），这些也是有效持仓，必须列出
 - 从上到下逐行读取，确认每一行都已记录
-- 输出格式：平台名称、每只股票/基金的名称、持仓数量、市值
+- 输出格式：平台名称、每只股票/基金的名称、代码（如截图中可见）、持仓数量、市值
 - **不要输出成本价/买入价**，只输出市值和持仓数量
 - 最后统计总共识别了多少条持仓记录`;
 
@@ -111,7 +111,10 @@ async function callVision(
             role: 'user',
             content: [
               { type: 'text', text: prompt },
-              { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } },
+              {
+                type: 'image_url',
+                image_url: { url: `data:${mime};base64,${base64}` },
+              },
             ],
           },
         ],
@@ -128,7 +131,9 @@ async function callVision(
     const data = (await res.json()) as {
       choices?: { message?: { content?: string } }[];
     };
-    return data.choices?.[0]?.message?.content || '[Vision model returned empty]';
+    return (
+      data.choices?.[0]?.message?.content || '[Vision model returned empty]'
+    );
   } finally {
     clearTimeout(timeout);
   }
@@ -155,7 +160,10 @@ async function splitTallImage(imagePath: string): Promise<Buffer[]> {
   const segments: Buffer[] = [];
   for (let i = 0; i < segCount; i++) {
     const top = Math.max(0, i * segHeight - (i > 0 ? overlap : 0));
-    const bottom = Math.min(height, (i + 1) * segHeight + (i < segCount - 1 ? overlap : 0));
+    const bottom = Math.min(
+      height,
+      (i + 1) * segHeight + (i < segCount - 1 ? overlap : 0),
+    );
     const h = bottom - top;
     const buf = await sharp(imagePath)
       .extract({ left: 0, top, width, height: h })
@@ -175,7 +183,9 @@ async function callVisionMultiImage(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 120_000);
 
-  const content: Array<Record<string, unknown>> = [{ type: 'text', text: prompt }];
+  const content: Array<Record<string, unknown>> = [
+    { type: 'text', text: prompt },
+  ];
   for (const buf of imageBuffers) {
     content.push({
       type: 'image_url',
@@ -206,7 +216,9 @@ async function callVisionMultiImage(
     const data = (await res.json()) as {
       choices?: { message?: { content?: string } }[];
     };
-    return data.choices?.[0]?.message?.content || '[Vision model returned empty]';
+    return (
+      data.choices?.[0]?.message?.content || '[Vision model returned empty]'
+    );
   } finally {
     clearTimeout(timeout);
   }
@@ -322,9 +334,18 @@ function repairJson(str: string): Record<string, unknown> | null {
   let inString = false;
   let escape = false;
   for (const ch of s) {
-    if (escape) { escape = false; continue; }
-    if (ch === '\\') { escape = true; continue; }
-    if (ch === '"') { inString = !inString; continue; }
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
     if (inString) continue;
     if (ch === '{') braces++;
     else if (ch === '}') braces--;
@@ -337,11 +358,23 @@ function repairJson(str: string): Record<string, unknown> | null {
     if (lastComplete > 0) {
       s = s.slice(0, lastComplete + 1);
       // Recount
-      braces = 0; brackets = 0; inString = false; escape = false;
+      braces = 0;
+      brackets = 0;
+      inString = false;
+      escape = false;
       for (const ch of s) {
-        if (escape) { escape = false; continue; }
-        if (ch === '\\') { escape = true; continue; }
-        if (ch === '"') { inString = !inString; continue; }
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (ch === '\\') {
+          escape = true;
+          continue;
+        }
+        if (ch === '"') {
+          inString = !inString;
+          continue;
+        }
         if (inString) continue;
         if (ch === '{') braces++;
         else if (ch === '}') braces--;
@@ -351,8 +384,14 @@ function repairJson(str: string): Record<string, unknown> | null {
     }
   }
   // Close unclosed brackets/braces
-  while (brackets > 0) { s += ']'; brackets--; }
-  while (braces > 0) { s += '}'; braces--; }
+  while (brackets > 0) {
+    s += ']';
+    brackets--;
+  }
+  while (braces > 0) {
+    s += '}';
+    braces--;
+  }
   try {
     return JSON.parse(s);
   } catch {
@@ -366,9 +405,18 @@ async function extractStructuredData(
   const env = readEnvFile([
     'OPENAI_API_KEY',
     'OPENAI_BASE_URL',
-    'VISION_MODEL',
+    'MODEL_NAME',
+    'DEEPSEEK_API_KEY',
+    'DEEPSEEK_BASE_URL',
+    'DEEPSEEK_MODEL',
   ]);
-  if (!env.OPENAI_API_KEY || !env.OPENAI_BASE_URL) {
+
+  const useDeepSeek = env.DEEPSEEK_API_KEY && env.DEEPSEEK_BASE_URL && env.DEEPSEEK_MODEL;
+  const apiKey = useDeepSeek ? env.DEEPSEEK_API_KEY : env.OPENAI_API_KEY;
+  const baseURL = useDeepSeek ? env.DEEPSEEK_BASE_URL : env.OPENAI_BASE_URL;
+  const extractionModel = useDeepSeek ? env.DEEPSEEK_MODEL : (env.MODEL_NAME || 'QwQ-32B');
+
+  if (!apiKey || !baseURL) {
     return { json: null, raw: 'LLM not configured' };
   }
 
@@ -377,19 +425,21 @@ async function extractStructuredData(
     analyses.join('\n---\n') +
     '\n---\n\n请仔细检查每个截图分析中的每一条持仓记录都已包含在 JSON 中，然后输出 JSON：';
 
-  const url = `${env.OPENAI_BASE_URL}/chat/completions`;
+  const url = `${baseURL}/chat/completions`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 60_000);
+
+  logger.info({ model: extractionModel, provider: useDeepSeek ? 'deepseek' : 'shopee' }, 'Extracting structured data with text model');
 
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: env.VISION_MODEL,
+        model: extractionModel,
         messages: [{ role: 'user', content: prompt }],
         max_tokens: 8000,
       }),
@@ -398,7 +448,10 @@ async function extractStructuredData(
 
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      return { json: null, raw: `LLM API error: HTTP ${res.status} ${text.slice(0, 200)}` };
+      return {
+        json: null,
+        raw: `LLM API error: HTTP ${res.status} ${text.slice(0, 200)}`,
+      };
     }
 
     const data = (await res.json()) as {
@@ -408,7 +461,10 @@ async function extractStructuredData(
 
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      return { json: null, raw: `LLM did not return JSON: ${raw.slice(0, 300)}` };
+      return {
+        json: null,
+        raw: `LLM did not return JSON: ${raw.slice(0, 300)}`,
+      };
     }
 
     let jsonStr = jsonMatch[0];
@@ -417,7 +473,10 @@ async function extractStructuredData(
       const parsed = JSON.parse(jsonStr);
       return { json: parsed, raw: jsonStr };
     } catch {
-      logger.warn({ length: jsonStr.length }, 'JSON parse failed, attempting repair');
+      logger.warn(
+        { length: jsonStr.length },
+        'JSON parse failed, attempting repair',
+      );
       const repaired = repairJson(jsonStr);
       if (repaired) {
         logger.info('JSON repaired successfully');
@@ -482,7 +541,11 @@ export async function processAssetUpdate(chatJid: string): Promise<string> {
     const analysis = await analyzeImage(img);
     analyses.push(analysis);
     logger.info(
-      { image: path.basename(img), length: analysis.length, preview: analysis.slice(0, 300) },
+      {
+        image: path.basename(img),
+        length: analysis.length,
+        preview: analysis.slice(0, 300),
+      },
       'Asset screenshot analyzed',
     );
   }
@@ -493,15 +556,26 @@ export async function processAssetUpdate(chatJid: string): Promise<string> {
     fs.mkdirSync(debugDir, { recursive: true });
     const debugFile = path.join(debugDir, 'asset-update-debug.log');
     const debugContent = analyses
-      .map((a, i) => `=== Screenshot ${i + 1} (${path.basename(imagePaths[i])}) ===\n${a}`)
+      .map(
+        (a, i) =>
+          `=== Screenshot ${i + 1} (${path.basename(imagePaths[i])}) ===\n${a}`,
+      )
       .join('\n\n');
-    fs.writeFileSync(debugFile, `${new Date().toISOString()}\n\n${debugContent}\n`);
+    fs.writeFileSync(
+      debugFile,
+      `${new Date().toISOString()}\n\n${debugContent}\n`,
+    );
     logger.info({ debugFile }, 'Full vision analyses saved to file');
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 
   // Step 2: Extract structured JSON
   logger.info(
-    { analysisCount: analyses.length, totalChars: analyses.reduce((a, b) => a + b.length, 0) },
+    {
+      analysisCount: analyses.length,
+      totalChars: analyses.reduce((a, b) => a + b.length, 0),
+    },
     'Extracting structured data from analyses',
   );
   const { json, raw } = await extractStructuredData(analyses);
@@ -513,28 +587,45 @@ export async function processAssetUpdate(chatJid: string): Promise<string> {
   // Convert marketValue -> price (price = marketValue / quantity)
   for (const key of Object.keys(json)) {
     const platform = json[key] as Record<string, unknown>;
-    const holdings = platform?.holdings as Array<Record<string, unknown>> | undefined;
+    const holdings = platform?.holdings as
+      | Array<Record<string, unknown>>
+      | undefined;
     if (!Array.isArray(holdings)) continue;
     for (const h of holdings) {
       if (h.marketValue != null && h.quantity) {
-        h.price = Math.round(((h.marketValue as number) / (h.quantity as number)) * 1000) / 1000;
+        h.price =
+          Math.round(
+            ((h.marketValue as number) / (h.quantity as number)) * 1000,
+          ) / 1000;
         delete h.marketValue;
       }
       if (h.marketValueUSD != null && h.quantity) {
-        h.priceUSD = Math.round(((h.marketValueUSD as number) / (h.quantity as number)) * 100) / 100;
+        h.priceUSD =
+          Math.round(
+            ((h.marketValueUSD as number) / (h.quantity as number)) * 100,
+          ) / 100;
         delete h.marketValueUSD;
       }
     }
   }
 
   const platforms = Object.keys(json);
-  logger.info({ platforms, extractedJson: raw.slice(0, 500) }, 'Structured data extracted');
+  logger.info(
+    { platforms, extractedJson: raw.slice(0, 500) },
+    'Structured data extracted',
+  );
 
   // Save extracted JSON for debugging
   try {
-    const debugFile = path.join(process.cwd(), 'logs', 'asset-update-debug.log');
+    const debugFile = path.join(
+      process.cwd(),
+      'logs',
+      'asset-update-debug.log',
+    );
     fs.appendFileSync(debugFile, `\n\n=== Extracted JSON ===\n${raw}\n`);
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 
   // Step 3: Patch assets
   const jsonStr = JSON.stringify(json);

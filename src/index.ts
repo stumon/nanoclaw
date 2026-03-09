@@ -190,14 +190,16 @@ async function handleAssetMessages(
     }
 
     // Advance cursor
-    lastAgentTimestamp[chatJid] =
-      messages[messages.length - 1].timestamp;
+    lastAgentTimestamp[chatJid] = messages[messages.length - 1].timestamp;
     saveState();
 
     // If "结束发送" also in same batch
     if (hasEnd) {
       if (getSessionImageCount(chatJid) === 0) {
-        logger.info({ chatJid }, 'End trigger in start batch but no images, waiting 12s');
+        logger.info(
+          { chatJid },
+          'End trigger in start batch but no images, waiting 12s',
+        );
         await new Promise((r) => setTimeout(r, 12_000));
       }
       if (getSessionImageCount(chatJid) > 0) {
@@ -225,14 +227,16 @@ async function handleAssetMessages(
     }
 
     // Advance cursor
-    lastAgentTimestamp[chatJid] =
-      messages[messages.length - 1].timestamp;
+    lastAgentTimestamp[chatJid] = messages[messages.length - 1].timestamp;
     saveState();
 
     if (hasEnd) {
       // Race-condition guard: if no images yet, wait for upload to finish
       if (getSessionImageCount(chatJid) === 0) {
-        logger.info({ chatJid }, 'End trigger received but no images yet, waiting 12s for uploads');
+        logger.info(
+          { chatJid },
+          'End trigger received but no images yet, waiting 12s for uploads',
+        );
         await new Promise((r) => setTimeout(r, 12_000));
       }
 
@@ -695,7 +699,9 @@ async function startMessageLoop(): Promise<void> {
               ASSISTANT_NAME,
             );
             const msgsForCheck =
-              allPendingForAsset.length > 0 ? allPendingForAsset : groupMessages;
+              allPendingForAsset.length > 0
+                ? allPendingForAsset
+                : groupMessages;
             const handled = await handleAssetMessages(
               chatJid,
               msgsForCheck,
@@ -813,7 +819,12 @@ async function main(): Promise<void> {
         }
       }
       logger.info(
-        { chatJid, sender: msg.sender_name, content: msg.content.slice(0, 200), fromMe: msg.is_from_me },
+        {
+          chatJid,
+          sender: msg.sender_name,
+          content: msg.content.slice(0, 200),
+          fromMe: msg.is_from_me,
+        },
         'Incoming message',
       );
       storeMessage(msg);
@@ -871,6 +882,14 @@ async function main(): Promise<void> {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
+    },
+    sendImage: async (jid, imagePath, caption) => {
+      const channel = findChannel(channels, jid);
+      if (!channel?.sendImage) {
+        logger.warn({ jid }, 'No channel or sendImage for JID, skip image');
+        return;
+      }
+      await channel.sendImage(jid, imagePath, caption);
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

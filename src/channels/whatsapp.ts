@@ -232,19 +232,28 @@ export class WhatsAppChannel implements Channel {
                   const mediaDir = path.join(GROUPS_DIR, groupFolder, 'media');
                   fs.mkdirSync(mediaDir, { recursive: true });
                   const ext = isDocImage
-                    ? (normalized.documentMessage!.fileName?.split('.').pop() || 'jpg')
+                    ? normalized.documentMessage!.fileName?.split('.').pop() ||
+                      'jpg'
                     : 'jpg';
                   const filename = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
                   const filePath = path.join(mediaDir, filename);
                   fs.writeFileSync(filePath, buffer);
                   imageTag = `[Image: media/${filename}]`;
                   logger.info(
-                    { chatJid, filename, size: buffer.length, type: isDocImage ? 'document' : 'image' },
+                    {
+                      chatJid,
+                      filename,
+                      size: buffer.length,
+                      type: isDocImage ? 'document' : 'image',
+                    },
                     'WhatsApp image saved',
                   );
                 }
               } catch (err) {
-                logger.warn({ chatJid, err }, 'Failed to download WhatsApp image');
+                logger.warn(
+                  { chatJid, err },
+                  'Failed to download WhatsApp image',
+                );
               }
             }
 
@@ -257,7 +266,9 @@ export class WhatsAppChannel implements Channel {
               '';
 
             const content = imageTag
-              ? (textContent ? `${imageTag}\n${textContent}` : imageTag)
+              ? textContent
+                ? `${imageTag}\n${textContent}`
+                : imageTag
               : textContent;
 
             // Skip protocol messages with no text content (encryption keys, read receipts, etc.)
@@ -323,6 +334,34 @@ export class WhatsAppChannel implements Channel {
         { jid, err, queueSize: this.outgoingQueue.length },
         'Failed to send, message queued',
       );
+    }
+  }
+
+  async sendImage(
+    jid: string,
+    imagePath: string,
+    caption?: string,
+  ): Promise<void> {
+    if (!this.connected) {
+      logger.warn({ jid, imagePath }, 'WA disconnected, cannot send image');
+      return;
+    }
+    const absPath = path.isAbsolute(imagePath)
+      ? imagePath
+      : path.join(process.cwd(), imagePath);
+    if (!fs.existsSync(absPath)) {
+      logger.warn({ absPath }, 'Image file not found, skip send');
+      return;
+    }
+    try {
+      const buffer = fs.readFileSync(absPath);
+      await this.sock.sendMessage(jid, {
+        image: buffer,
+        caption: caption ?? undefined,
+      });
+      logger.info({ jid, imagePath: absPath }, 'Image sent');
+    } catch (err) {
+      logger.error({ jid, imagePath: absPath, err }, 'Failed to send image');
     }
   }
 

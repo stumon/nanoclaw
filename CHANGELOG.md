@@ -1,5 +1,33 @@
 # NanoClaw Changelog
 
+## v1.3.2 - 2026-03-08
+
+### Changed
+- hnair-ticket-check.ts 完全重写：从查询特价推广列表改为查询**实际航班最低价**
+  - 核心方案：Playwright 加载 m.hnair.com 移动端首页，截获内部签名的 lowFareTicket API，获取全日期最低价
+  - 补充数据源：特价 API（国内+国际）、Tavily 搜索
+  - 解决了之前"无数据"的根本问题：特价列表不等于实际航班价格
+- 数据准确性：获取的是海航真实售票系统的价格，包含促销活动价格（如"周二幸运夜"¥199）
+
+### Updated
+- hnair-ticket-alert SKILL.md: 更新数据源说明为 Playwright 截获方案，详细解释工作原理
+
+### Dependencies
+- playwright (已在 package.json 中)
+- Chromium 浏览器 (`npx playwright install chromium`)
+
+## v1.3.1 - 2026-03-08
+
+### Changed
+- hnair-ticket-check.ts 重写：删除 200 行 Playwright 代码，改为三层数据源（gntjjp API 国内+国际、主页 HTML、Tavily 搜索）
+- 无需 Playwright 依赖，纯 fetch 实现，代码从 450 行缩到 200 行
+
+### Added
+- docs/SKILLS.md: 101 个 skills 中文功能说明，按场景分类，含使用方式和秘钥要求
+
+### Fixed
+- hnair-ticket-alert SKILL.md: 更新为三层数据源说明，去掉 Playwright 前置条件
+
 ## v1.3.0 - 2026-03-08
 
 ### Changed

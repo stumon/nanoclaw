@@ -63,6 +63,25 @@ server.tool(
 );
 
 server.tool(
+  'send_image',
+  'Send an image file to the user or group. The image must already exist in the group folder (/workspace/group). Use this after generating an infographic or other image. Call with the filename (e.g. infographic-en.png) relative to the group folder.',
+  {
+    relativePath: z.string().describe('Filename or path relative to /workspace/group, e.g. infographic-en.png or infographic/news-brief-xxx/infographic.png'),
+    caption: z.string().optional().describe('Optional caption for the image'),
+  },
+  async (args) => {
+    const data = {
+      type: 'send_image',
+      imagePath: args.relativePath,
+      caption: args.caption ?? undefined,
+      timestamp: new Date().toISOString(),
+    };
+    writeIpcFile(MESSAGES_DIR, data);
+    return { content: [{ type: 'text' as const, text: 'Image send requested.' }] };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools.
 

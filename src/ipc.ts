@@ -3,7 +3,7 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { DATA_DIR, GROUPS_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
@@ -12,6 +12,12 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  /** 可选：发送图片（主机绝对路径），由 IPC send_image 使用 */
+  sendImage?: (
+    jid: string,
+    imagePath: string,
+    caption?: string,
+  ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -90,6 +96,48 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
                   );
+                }
+              } else if (
+                data.type === 'send_image' &&
+                data.imagePath &&
+                deps.sendImage
+              ) {
+                const chatJid =
+                  data.chatJid ??
+                  Object.entries(registeredGroups).find(
+                    ([, g]) => g.folder === sourceGroup,
+                  )?.[0];
+                if (!chatJid) {
+                  logger.warn(
+                    { sourceGroup },
+                    'IPC send_image: no chatJid and no group match',
+                  );
+                } else {
+                  const targetGroup = registeredGroups[chatJid];
+                  if (
+                    isMain ||
+                    (targetGroup && targetGroup.folder === sourceGroup)
+                  ) {
+                    const absPath = path.join(
+                      GROUPS_DIR,
+                      sourceGroup,
+                      data.imagePath as string,
+                    );
+                    await deps.sendImage(
+                      chatJid,
+                      absPath,
+                      data.caption ?? undefined,
+                    );
+                    logger.info(
+                      { chatJid, imagePath: data.imagePath, sourceGroup },
+                      'IPC image sent',
+                    );
+                  } else {
+                    logger.warn(
+                      { chatJid, sourceGroup },
+                      'Unauthorized IPC send_image attempt blocked',
+                    );
+                  }
                 }
               }
               fs.unlinkSync(filePath);
