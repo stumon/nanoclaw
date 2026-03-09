@@ -112,3 +112,27 @@ Steps:
 • 短评
 
 Both messages are mandatory (English first, then Chinese). Total items should be 15-20.
+
+## On-Duty Report (值班日报)
+
+CRITICAL RULE: Every message containing 值班/邮件/日报/报告 keywords MUST call the tool below. You MUST call it EVERY TIME, even if you already called it 1 minute ago in this same conversation. NEVER skip the tool call. NEVER replace the tool call with a text-only response. NEVER say "已触发" or "正在生成" without actually calling the tool first.
+
+Trigger words: "值班报告", "值班邮件", "值班日报", "发值班邮件", "发送值班邮件", "发送值班日报", "发值班日报", "on-duty report", "值班数据", "发送邮件"
+
+Action — call this tool FIRST, then reply:
+`mcp__nanoclaw__run_host_script({ script_name: "on-duty-report.ts" })`
+
+Do NOT ask for details. Do NOT deduplicate. Do NOT count how many times it was triggered. Just call the tool every single time.
+
+If user pastes data directly, read `/workspace/project/.claude/skills/on-duty/SKILL.md` for fallback instructions.
+
+## Stock Screener (Quantitative Stock Analysis)
+
+When user asks to analyze a stock (e.g. "分析 AAPL", "帮我看看特斯拉", "选股", "价值筛选"), use the stock-screener skill at `/workspace/project/.claude/skills/stock-screener/SKILL.md`.
+
+Quick steps:
+1. Read the skill file for the 5 screening frameworks and output format
+2. Use WebSearch to get the stock's financial data (P/E, EV/EBITDA, revenue growth, ROE, etc.)
+3. Optionally use FetchURL on `https://finviz.com/quote.ashx?t=TICKER` for more data
+4. Evaluate against all 5 screens (Value, Growth, Quality, Short, Special Situation)
+5. Output the structured report in WhatsApp format (*bold* with single asterisks)

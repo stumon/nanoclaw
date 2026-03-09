@@ -1,3 +1,4 @@
+import { exec } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -212,6 +213,7 @@ export async function processTaskIpc(
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
+    script_name?: string;
     // For register_group
     jid?: string;
     name?: string;
@@ -430,6 +432,87 @@ export async function processTaskIpc(
         );
       }
       break;
+
+    case 'run_host_script': {
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized run_host_script attempt blocked',
+        );
+        break;
+      }
+      const scriptName = data.script_name;
+      if (
+        !scriptName ||
+        scriptName.includes('..') ||
+        !scriptName.endsWith('.ts') ||
+        /[^a-zA-Z0-9_\-.]/.test(scriptName)
+      ) {
+        logger.warn(
+          { scriptName, sourceGroup },
+          'run_host_script: invalid script name',
+        );
+        break;
+      }
+      const scriptPath = path.join(process.cwd(), 'scripts', scriptName);
+      if (!fs.existsSync(scriptPath)) {
+        logger.warn(
+          { scriptPath, sourceGroup },
+          'run_host_script: script not found',
+        );
+        break;
+      }
+
+      const replyJid =
+        data.chatJid ??
+        Object.entries(registeredGroups).find(
+          ([, g]) => g.folder === sourceGroup,
+        )?.[0];
+
+      logger.info(
+        { scriptName, sourceGroup },
+        'Running host script via IPC',
+      );
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          exec(
+            `npx tsx scripts/${scriptName}`,
+            {
+              cwd: process.cwd(),
+              timeout: 120_000,
+              env: process.env,
+            },
+            (error, stdout, stderr) => {
+              if (error) {
+                logger.error(
+                  { scriptName, error: error.message, stderr },
+                  'Host script failed',
+                );
+                if (replyJid) {
+                  deps
+                    .sendMessage(
+                      replyJid,
+                      `Host script ${scriptName} failed: ${error.message}`,
+                    )
+                    .catch(() => {});
+                }
+                reject(error);
+              } else {
+                logger.info(
+                  { scriptName, stdoutLen: stdout.length },
+                  'Host script completed',
+                );
+                resolve();
+              }
+            },
+          );
+        });
+      } catch {
+        // error already logged and notified above
+      }
+      break;
+    }
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');

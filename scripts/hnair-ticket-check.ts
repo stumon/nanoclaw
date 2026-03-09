@@ -157,36 +157,9 @@ function cityToIata(name: string): string {
   return CITY_IATA[name] || name;
 }
 
-/** 从航班列表 API 响应中解析第一班航班号、起飞/到达时间，以及整页最低可预订价 */
-function parseSearchApiBody(body: unknown): {
-  flightNo?: string;
-  depTime?: string;
-  arrTime?: string;
-  /** 该日期实际可预订的最低价（与 App 列表一致） */
-  minListPrice?: number;
-} {
-  const o = body as Record<string, unknown>;
-  const data = o?.data as Record<string, unknown> | undefined;
-  const list = (data?.flightList ?? data?.flights ?? data?.list ?? data?.flightInfoList) as Array<Record<string, unknown>> | undefined;
-  if (!Array.isArray(list) || list.length === 0) return {};
+const SAMPLE_RELOADS = 15;
 
-  const first = list[0];
-  const flightNo = (first.flightNo ?? first.flightNumber ?? first.flightNoDisplay) as string | undefined;
-  const depTime = (first.depTime ?? first.departTime ?? first.departureTime) as string | undefined;
-  const arrTime = (first.arrTime ?? first.arriveTime ?? first.arrivalTime) as string | undefined;
-
-  let minListPrice: number | undefined;
-  for (const item of list) {
-    const p = item.price ?? item.lowestPrice ?? item.cashPrice ?? item.adultPrice ?? item.salePrice;
-    const num = typeof p === 'number' ? p : typeof p === 'string' ? Number(p) : undefined;
-    if (num != null && Number.isFinite(num) && num > 0 && num < 100000) {
-      if (minListPrice == null || num < minListPrice) minListPrice = num;
-    }
-  }
-  return { flightNo, depTime, arrTime, minListPrice };
-}
-
-// ── 数据源 1：Playwright 截获 m.hnair.com lowFareTicket API ──
+// ── 数据源 1：Playwright 多次采样 m.hnair.com lowFareTicket 会员价 API ──
 async function fetchViaPlaywright(cfg: HnairConfig): Promise<Flight[]> {
   const dstCode = cityToIata(cfg.destination);
   let browser;
@@ -198,92 +171,60 @@ async function fetchViaPlaywright(cfg: HnairConfig): Promise<Flight[]> {
     });
     const page = await context.newPage();
 
-    const flights: Flight[] = [];
-    let gotData = false;
+    const dateMap = new Map<string, { price: number; discount?: number; cabin?: string }>();
 
     page.on('response', async (response) => {
       const url = response.url();
-      const ct = response.headers()['content-type'] || '';
-      if (!ct.includes('json')) return;
-
+      if (!url.includes('lowFareTicket') || !(response.headers()['content-type'] || '').includes('json')) return;
       try {
-        if (url.includes('lowFareTicket')) {
-          const body = await response.json() as {
-            data?: {
-              ok?: boolean;
-              info?: Array<{
-                dstAndAirlinePriceInfo?: Array<{
-                  dst: string;
-                  dstName: string;
-                  airlinePriceInfo: {
-                    date: string;
-                    lowestPrice: number;
-                    lowestDiscount: number;
-                    cabin: string;
-                    cabinClass: string;
-                  };
-                }>;
-              }>;
-            };
-          };
-
-          if (!body?.data?.info) return;
-          for (const entry of body.data.info) {
-            for (const dst of entry.dstAndAirlinePriceInfo || []) {
-              if (dst.dst === dstCode) {
-                const info = dst.airlinePriceInfo;
-                flights.push({
-                  date: info.date,
-                  price: info.lowestPrice,
-                  discount: info.lowestDiscount,
-                  cabin: info.cabin,
-                  origin: cfg.origin,
-                  destination: cfg.destination,
-                  source: 'playwright-lowFare',
-                });
-                gotData = true;
+        const body = await response.json() as {
+          data?: { info?: Array<{ dstAndAirlinePriceInfo?: Array<{ dst: string; airlinePriceInfo: { date: string; lowestPrice: number; lowestDiscount: number; cabin: string } }> }> };
+        };
+        if (!body?.data?.info) return;
+        for (const entry of body.data.info) {
+          for (const dst of entry.dstAndAirlinePriceInfo || []) {
+            if (dst.dst === dstCode) {
+              const info = dst.airlinePriceInfo;
+              const existing = dateMap.get(info.date);
+              if (!existing || info.lowestPrice < existing.price) {
+                dateMap.set(info.date, { price: info.lowestPrice, discount: info.lowestDiscount, cabin: info.cabin });
               }
             }
           }
         }
-      } catch { /* ignore parse errors */ }
+      } catch { /* ignore */ }
     });
 
+    log(`[Playwright] 开始 ${SAMPLE_RELOADS + 1} 次采样...`);
     await page.goto('https://m.hnair.com/', { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(1500);
 
-    if (!gotData) {
-      await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
-      await page.waitForTimeout(2000);
-    }
-
-    if (flights.length > 0) {
-      const cheapest = flights[0];
-      const listUrl = `https://m.hnair.com/#/flightList?orgCity=${cityToIata(cfg.origin)}&dstCity=${dstCode}&departDate=${cheapest.date}&adultNum=1&childNum=0&infantNum=0&cabinClass=Y`;
-      try {
-        await page.goto(listUrl, { waitUntil: 'networkidle', timeout: 30000 });
-        const searchResp = await page.waitForResponse(
-          (r) => r.url().includes('airLowFareSearch') && !r.url().includes('Lower'),
-          { timeout: 10000 }
-        );
-        const searchApiBody = await searchResp.json();
-        const parsed = parseSearchApiBody(searchApiBody);
-        if (parsed.flightNo || parsed.depTime || parsed.arrTime) {
-          flights[0].flightNo = parsed.flightNo;
-          flights[0].depTime = parsed.depTime;
-          flights[0].arrTime = parsed.arrTime;
-        }
-        if (parsed.minListPrice != null) {
-          flights[0].actualListPrice = parsed.minListPrice;
-        }
-      } catch {
-        // 列表页可能不触发 API 或超时，保留价格与日期即可
-      }
+    for (let i = 0; i < SAMPLE_RELOADS; i++) {
+      await page.reload({ waitUntil: 'networkidle', timeout: 20000 }).catch(() => {});
+      await page.waitForTimeout(1200);
     }
 
     await browser.close();
     browser = undefined;
-    return flights.sort((a, b) => a.price - b.price);
+
+    log(`[Playwright] 采样完成: ${dateMap.size} 个日期`);
+    for (const [d, v] of [...dateMap.entries()].sort((a, b) => a[1].price - b[1].price)) {
+      log(`[Playwright]   ${d} → ¥${v.price}${v.discount ? ` (${(v.discount * 100).toFixed(0)}折)` : ''}`);
+    }
+
+    if (dateMap.size === 0) return [];
+
+    return [...dateMap.entries()]
+      .map(([date, v]) => ({
+        date,
+        price: v.price,
+        discount: v.discount,
+        cabin: v.cabin,
+        origin: cfg.origin,
+        destination: cfg.destination,
+        source: 'playwright-member',
+      }))
+      .sort((a, b) => a.price - b.price);
   } catch (e) {
     log(`[Playwright] 失败: ${e instanceof Error ? e.message : String(e)}`);
     return [];
@@ -292,25 +233,16 @@ async function fetchViaPlaywright(cfg: HnairConfig): Promise<Flight[]> {
   }
 }
 
-/** 单条航班用于日志展示（区分促销参考价与实际可预订价） */
+/** 单条航班用于日志展示 */
 function formatFlightLogLine(f: Flight): string {
   const parts: string[] = [];
-  parts.push(`航空公司 ${AIRLINE_NAME}`);
-  parts.push(`航线 ${f.origin}-${f.destination}`);
-  parts.push(`日期 ${formatDate(f.date)}`);
-
-  if (f.actualListPrice != null) {
-    parts.push(`实际可订最低 ¥${f.actualListPrice}`);
-    if (f.price < f.actualListPrice) {
-      parts.push(`促销参考 ¥${f.price}（活动价，数量有限，以 App 内为准）`);
-    }
-  } else {
-    parts.push(`促销参考价 ¥${f.price}（非列表价，以 App 内查询为准）`);
-  }
-  if (f.discount != null) parts.push(`经济舱 ${(f.discount * 100).toFixed(0)}折`);
-  if (f.cabin) parts.push(`舱位 ${f.cabin}`);
-  if (f.flightNo) parts.push(`航班 ${f.flightNo}`);
-  if (f.depTime || f.arrTime) parts.push(`起飞 ${f.depTime ?? '-'} 到达 ${f.arrTime ?? '-'}`);
+  parts.push(`${AIRLINE_NAME}`);
+  parts.push(`${f.origin}-${f.destination}`);
+  parts.push(`${formatDate(f.date)}`);
+  parts.push(`¥${f.actualListPrice ?? f.price}`);
+  if (f.discount != null) parts.push(`${(f.discount * 100).toFixed(0)}折`);
+  if (f.flightNo) parts.push(`${f.flightNo}`);
+  if (f.depTime || f.arrTime) parts.push(`${f.depTime ?? '-'}-${f.arrTime ?? '-'}`);
   return parts.join(' | ');
 }
 
@@ -417,10 +349,10 @@ async function main(): Promise<void> {
 
   let allFlights: Flight[] = [];
 
-  // 数据源 1：Playwright 截获移动端 lowFareTicket API（全日期最低价）
+  // 数据源 1：Playwright 多次采样 lowFareTicket API
   const pwFlights = await fetchViaPlaywright(cfg);
   if (pwFlights.length > 0) {
-    log(`[航班信息] ${formatFlightLogLine(pwFlights[0])}`);
+    log(`[Playwright] 共 ${pwFlights.length} 个日期，最低: ${formatFlightLogLine(pwFlights[0])}`);
     allFlights.push(...pwFlights);
   } else {
     log(`[Playwright] ${route} 无数据`);
@@ -444,7 +376,6 @@ async function main(): Promise<void> {
     }
   }
 
-  // 排序：优先按实际可订价，无则按促销参考价
   const effectivePrice = (f: Flight) => f.actualListPrice ?? f.price;
   allFlights.sort((a, b) => effectivePrice(a) - effectivePrice(b));
 
@@ -452,16 +383,21 @@ async function main(): Promise<void> {
   const minEffective = minFlight ? effectivePrice(minFlight) : Infinity;
   let notified = false;
 
-  // 仅当拿到「实际可订价」且低于阈值时才通知。仅有促销参考价（如 199）时不通知，因与 App 内列表价可能不一致
-  if (minFlight && minFlight.actualListPrice != null && minFlight.actualListPrice <= cfg.priceMax) {
-    const cheap = allFlights.filter((f) => f.actualListPrice != null && f.actualListPrice <= cfg.priceMax).slice(0, 10);
-    const lines = cheap.map((f) => `  ${formatDate(f.date)} ¥${f.actualListPrice}`);
+  if (minFlight && minEffective <= cfg.priceMax) {
+    const cheap = allFlights.filter((f) => effectivePrice(f) <= cfg.priceMax).slice(0, 15);
+    const seen = new Set<string>();
+    const uniqueCheap = cheap.filter((f) => { if (seen.has(f.date)) return false; seen.add(f.date); return true; });
+    const lines = uniqueCheap.map((f) => {
+      const ep = effectivePrice(f);
+      const discountTag = f.discount ? ` (${(f.discount * 100).toFixed(0)}折)` : '';
+      return `  ${formatDate(f.date)} ¥${ep}${discountTag}`;
+    });
     const searchUrl = `https://m.hnair.com/#/flightList?orgCity=${cityToIata(cfg.origin)}&dstCity=${cityToIata(cfg.destination)}&departDate=${minFlight.date}&adultNum=1&childNum=0&infantNum=0&cabinClass=Y`;
     sendIpcAlert(
       `✈️ 海南航空低价提醒\n` +
-      `${route} 实际可订价低于 ¥${cfg.priceMax}！\n\n` +
-      `最低价：\n${lines.join('\n')}\n\n` +
-      `查看详情：${searchUrl}`
+      `${route} 发现低于 ¥${cfg.priceMax} 的飞飞乐会员价！\n\n` +
+      `低价日期（${uniqueCheap.length} 个）：\n${lines.join('\n')}\n\n` +
+      `请在海航 App 中查看确认\n${searchUrl}`
     );
     notified = true;
   }
@@ -469,13 +405,7 @@ async function main(): Promise<void> {
   const sources = [...new Set(allFlights.map((f) => f.source))].join('+') || '无';
   const status = notified ? '已通知' : (minFlight ? '未达阈值' : '无数据');
   if (minFlight) {
-    const priceDesc = minFlight.actualListPrice != null
-      ? `实际可订 ¥${minFlight.actualListPrice} (${formatDate(minFlight.date)})`
-      : `促销参考 ¥${minFlight.price} (${formatDate(minFlight.date)}，以 App 为准)`;
-    log(`[摘要] ${AIRLINE_NAME} | ${route} | ${priceDesc} | 阈值 ¥${cfg.priceMax} | ${status} | 数据源 ${sources}`);
-    if (minFlight.flightNo || minFlight.depTime || minFlight.arrTime) {
-      log(`[摘要] 航班 ${minFlight.flightNo ?? '-'} 起飞 ${minFlight.depTime ?? '-'} 到达 ${minFlight.arrTime ?? '-'}`);
-    }
+    log(`[摘要] ${AIRLINE_NAME} | ${route} | ¥${effectivePrice(minFlight)} (${formatDate(minFlight.date)}) | 阈值 ¥${cfg.priceMax} | ${status} | 数据源 ${sources}`);
   } else {
     log(`[摘要] ${AIRLINE_NAME} | ${route} | 无数据 | 阈值 ¥${cfg.priceMax} | ${status} | 数据源 ${sources}`);
   }

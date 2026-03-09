@@ -23,6 +23,7 @@ import {
   writeTasksSnapshot,
 } from './container-runner.js';
 import { startApiProxy } from './api-proxy.js';
+import { startForwardProxy } from './forward-proxy.js';
 import { readEnvFile } from './env.js';
 import {
   cleanupOrphans,
@@ -784,6 +785,7 @@ async function main(): Promise<void> {
   const apiEnv = readEnvFile(['OPENAI_BASE_URL', 'ANTHROPIC_BASE_URL']);
   const baseUrl = apiEnv.OPENAI_BASE_URL || apiEnv.ANTHROPIC_BASE_URL;
   if (baseUrl) startApiProxy(new URL(baseUrl).origin);
+  startForwardProxy();
 
   initDatabase();
   logger.info('Database initialized');

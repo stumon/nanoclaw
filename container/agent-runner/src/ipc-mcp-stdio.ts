@@ -299,6 +299,52 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+server.tool(
+  'run_host_script',
+  `Run a script on the host machine (outside the container). Use this when a task requires host-side resources like VPN, local binaries, or host-only credentials. The script must exist in the project's scripts/ directory and end with .ts. Main group only.
+
+Example: run_host_script({ script_name: "on-duty-report.ts" }) — runs scripts/on-duty-report.ts on the host.
+
+The script runs asynchronously. Output or errors are sent back to the chat automatically. You do NOT need to check for results — just tell the user it has been triggered.`,
+  {
+    script_name: z.string().describe('Script filename in the scripts/ directory, e.g. "on-duty-report.ts"'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can run host scripts.' }],
+        isError: true,
+      };
+    }
+
+    if (
+      !args.script_name ||
+      args.script_name.includes('..') ||
+      !args.script_name.endsWith('.ts') ||
+      /[^a-zA-Z0-9_\-.]/.test(args.script_name)
+    ) {
+      return {
+        content: [{ type: 'text' as const, text: `Invalid script name: "${args.script_name}". Must be a .ts file in scripts/ with no path separators.` }],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'run_host_script',
+      script_name: args.script_name,
+      chatJid,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `Host script "${args.script_name}" triggered. The host will execute it and results will be sent back automatically.` }],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

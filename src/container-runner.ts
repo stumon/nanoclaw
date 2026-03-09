@@ -4,6 +4,7 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -84,49 +85,39 @@ function buildVolumeMounts(
   const groupDir = resolveGroupFolderPath(group.folder);
 
   if (isMain) {
-    // Main gets the project root read-only. Writable paths the agent needs
-    // (group folder, IPC, .claude/) are mounted separately below.
-    // Read-only prevents the agent from modifying host application code
-    // (src/, dist/, package.json, etc.) which would bypass the sandbox
-    // entirely on next restart.
     mounts.push({
       hostPath: projectRoot,
       containerPath: '/workspace/project',
       readonly: true,
     });
 
-    // Main also gets its group folder as the working directory
     mounts.push({
       hostPath: groupDir,
       containerPath: '/workspace/group',
       readonly: false,
     });
   } else {
-    // Other groups only get their own folder
     mounts.push({
       hostPath: groupDir,
       containerPath: '/workspace/group',
       readonly: false,
     });
 
-    // Project root read-only so non-main groups can access shared data
-    // (e.g. data/news-brief-*.md, scripts/)
     mounts.push({
       hostPath: projectRoot,
       containerPath: '/workspace/project',
       readonly: true,
     });
+  }
 
-    // Global memory directory (read-only for non-main)
-    // Only directory mounts are supported, not file mounts
-    const globalDir = path.join(GROUPS_DIR, 'global');
-    if (fs.existsSync(globalDir)) {
-      mounts.push({
-        hostPath: globalDir,
-        containerPath: '/workspace/global',
-        readonly: true,
-      });
-    }
+  // Global memory directory (all groups, read-only)
+  const globalDir = path.join(GROUPS_DIR, 'global');
+  if (fs.existsSync(globalDir)) {
+    mounts.push({
+      hostPath: globalDir,
+      containerPath: '/workspace/global',
+      readonly: true,
+    });
   }
 
   // Per-group Claude sessions directory (isolated from other groups)
@@ -211,6 +202,16 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Gmail OAuth credentials (read-write: MCP may refresh tokens)
+  const gmailDir = path.join(os.homedir(), '.gmail-mcp');
+  if (fs.existsSync(gmailDir)) {
+    mounts.push({
+      hostPath: gmailDir,
+      containerPath: '/home/node/.gmail-mcp',
+      readonly: false,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -246,6 +247,17 @@ function buildContainerArgs(
 
   // Prefer IPv4 DNS to avoid HTTPS timeouts with IPv6 NAT on Apple Container
   args.push('-e', 'NODE_OPTIONS=--dns-result-order=ipv4first');
+
+  // Universal outbound proxy: route ALL container HTTP traffic through the host.
+  // Apple Container NAT only allows reaching 192.168.64.1, so without this,
+  // apt-get, pip, curl, fetch, agent-browser, etc. would all fail.
+  const proxyUrl = 'http://192.168.64.1:8463';
+  args.push('-e', `HTTP_PROXY=${proxyUrl}`);
+  args.push('-e', `HTTPS_PROXY=${proxyUrl}`);
+  args.push('-e', `http_proxy=${proxyUrl}`);
+  args.push('-e', `https_proxy=${proxyUrl}`);
+  args.push('-e', 'NO_PROXY=192.168.64.1,localhost,127.0.0.1');
+  args.push('-e', 'no_proxy=192.168.64.1,localhost,127.0.0.1');
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),

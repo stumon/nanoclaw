@@ -411,10 +411,13 @@ async function extractStructuredData(
     'DEEPSEEK_MODEL',
   ]);
 
-  const useDeepSeek = env.DEEPSEEK_API_KEY && env.DEEPSEEK_BASE_URL && env.DEEPSEEK_MODEL;
+  const useDeepSeek =
+    env.DEEPSEEK_API_KEY && env.DEEPSEEK_BASE_URL && env.DEEPSEEK_MODEL;
   const apiKey = useDeepSeek ? env.DEEPSEEK_API_KEY : env.OPENAI_API_KEY;
   const baseURL = useDeepSeek ? env.DEEPSEEK_BASE_URL : env.OPENAI_BASE_URL;
-  const extractionModel = useDeepSeek ? env.DEEPSEEK_MODEL : (env.MODEL_NAME || 'QwQ-32B');
+  const extractionModel = useDeepSeek
+    ? env.DEEPSEEK_MODEL
+    : env.MODEL_NAME || 'QwQ-32B';
 
   if (!apiKey || !baseURL) {
     return { json: null, raw: 'LLM not configured' };
@@ -429,7 +432,10 @@ async function extractStructuredData(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 60_000);
 
-  logger.info({ model: extractionModel, provider: useDeepSeek ? 'deepseek' : 'shopee' }, 'Extracting structured data with text model');
+  logger.info(
+    { model: extractionModel, provider: useDeepSeek ? 'deepseek' : 'shopee' },
+    'Extracting structured data with text model',
+  );
 
   try {
     const res = await fetch(url, {

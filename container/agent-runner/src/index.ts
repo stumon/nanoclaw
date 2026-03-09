@@ -144,9 +144,11 @@ interface McpClient {
   buffer: string;
 }
 
-function startMcpServer(mcpServerPath: string, env: Record<string, string>): Promise<McpClient> {
+function startMcpServer(mcpServerPath: string, env: Record<string, string>, command?: string, args?: string[]): Promise<McpClient> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('node', [mcpServerPath], {
+    const cmd = command || 'node';
+    const cmdArgs = args || [mcpServerPath];
+    const proc = spawn(cmd, cmdArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, ...env },
     });
@@ -657,8 +659,8 @@ Keep responses concise and actionable. Use tools proactively to complete tasks r
     } catch { /* ignore */ }
   }
 
-  // Load global CLAUDE.md for non-main groups
-  if (!containerInput.isMain) {
+  // Load global CLAUDE.md (shared instructions for all groups)
+  {
     const globalClaudeMd = '/workspace/global/CLAUDE.md';
     if (fs.existsSync(globalClaudeMd)) {
       try {
@@ -691,6 +693,7 @@ async function runAgentLoop(
   messages: ChatCompletionMessageParam[],
   tools: ChatCompletionTool[],
   mcpClient: McpClient | null,
+  gmailClient: McpClient | null = null,
 ): Promise<string | null> {
   let iterations = 0;
 
@@ -760,6 +763,14 @@ async function runAgentLoop(
             result = await callMcpTool(mcpClient, mcpToolName, fnArgs);
           } catch (err) {
             result = `MCP tool error: ${err instanceof Error ? err.message : String(err)}`;
+          }
+        } else if (fnName.startsWith('mcp__gmail__') && gmailClient) {
+          const mcpToolName = fnName.replace('mcp__gmail__', '');
+          log(`Calling Gmail MCP tool: ${mcpToolName}`);
+          try {
+            result = await callMcpTool(gmailClient, mcpToolName, fnArgs);
+          } catch (err) {
+            result = `Gmail MCP tool error: ${err instanceof Error ? err.message : String(err)}`;
           }
         } else {
           log(`Executing tool: ${fnName}`);
@@ -921,6 +932,7 @@ async function runQuery(
   conversationHistory: ChatCompletionMessageParam[],
   systemPrompt: string,
   mcpClient: McpClient | null,
+  gmailClient: McpClient | null = null,
 ): Promise<{ closedDuringQuery: boolean }> {
   // Poll IPC for _close sentinel during the query
   let ipcPolling = true;
@@ -948,7 +960,7 @@ async function runQuery(
   ];
 
   try {
-    const result = await runAgentLoop(client, modelName, apiMessages, allTools, mcpClient);
+    const result = await runAgentLoop(client, modelName, apiMessages, allTools, mcpClient, gmailClient);
 
     // Sync conversation history with what the agent loop produced
     // (apiMessages[0] is system prompt, rest maps to conversationHistory)
@@ -1040,6 +1052,25 @@ async function main(): Promise<void> {
     log(`MCP server failed to start: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  // Start Gmail MCP server (if credentials exist)
+  let gmailClient: McpClient | null = null;
+  const gmailCredPath = '/home/node/.gmail-mcp/credentials.json';
+  if (fs.existsSync(gmailCredPath)) {
+    try {
+      gmailClient = await startMcpServer(
+        '',
+        {},
+        'npx',
+        ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
+      );
+      log(`Gmail MCP: ${gmailClient.tools.length} tools`);
+    } catch (err) {
+      log(`Gmail MCP failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  } else {
+    log('Gmail MCP skipped (no credentials at /home/node/.gmail-mcp/)');
+  }
+
   // Build tool list: built-in + MCP tools
   const allTools: ChatCompletionTool[] = [...BUILTIN_TOOLS];
   if (mcpClient) {
@@ -1048,6 +1079,18 @@ async function main(): Promise<void> {
         type: 'function',
         function: {
           name: `mcp__nanoclaw__${tool.name}`,
+          description: tool.description,
+          parameters: sanitizeSchema(tool.inputSchema as Record<string, unknown>),
+        },
+      });
+    }
+  }
+  if (gmailClient) {
+    for (const tool of gmailClient.tools) {
+      allTools.push({
+        type: 'function',
+        function: {
+          name: `mcp__gmail__${tool.name}`,
           description: tool.description,
           parameters: sanitizeSchema(tool.inputSchema as Record<string, unknown>),
         },
@@ -1079,7 +1122,7 @@ async function main(): Promise<void> {
 
       const queryResult = await runQuery(
         prompt, containerInput, client, modelName,
-        allTools, conversationHistory, systemPrompt, mcpClient,
+        allTools, conversationHistory, systemPrompt, mcpClient, gmailClient,
       );
 
       if (queryResult.closedDuringQuery) {
@@ -1111,6 +1154,7 @@ async function main(): Promise<void> {
     process.exit(1);
   } finally {
     if (mcpClient) closeMcpClient(mcpClient);
+    if (gmailClient) closeMcpClient(gmailClient);
   }
 }
 

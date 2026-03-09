@@ -33,8 +33,14 @@ export function startApiProxy(targetOrigin: string): void {
   const defaultTarget = new URL(targetOrigin);
 
   const HOP_BY_HOP = new Set([
-    'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
-    'te', 'trailer', 'transfer-encoding', 'upgrade',
+    'connection',
+    'keep-alive',
+    'proxy-authenticate',
+    'proxy-authorization',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade',
   ]);
 
   function resolveTarget(url: string): { target: URL; path: string } {
@@ -48,7 +54,10 @@ export function startApiProxy(targetOrigin: string): void {
 
   let fetchBrowser: Browser | null = null;
 
-  async function handleFetchUrl(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  async function handleFetchUrl(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', async () => {
@@ -67,7 +76,10 @@ export function startApiProxy(targetOrigin: string): void {
         }
         const page = await fetchBrowser.newPage();
         try {
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+          await page.goto(url, {
+            waitUntil: 'domcontentloaded',
+            timeout: 25000,
+          });
           await page.waitForTimeout(3000);
           const title = await page.title();
           const content: string = await page.evaluate(`
@@ -86,12 +98,16 @@ export function startApiProxy(targetOrigin: string): void {
               return document.body ? document.body.textContent.trim() : '';
             })()
           `);
-          const trimmed = content.length > maxChars
-            ? content.slice(0, maxChars) + '\n[...truncated]'
-            : content;
+          const trimmed =
+            content.length > maxChars
+              ? content.slice(0, maxChars) + '\n[...truncated]'
+              : content;
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ title, content: trimmed }));
-          logger.info({ url, titleLen: title.length, contentLen: trimmed.length }, 'FetchURL: done');
+          logger.info(
+            { url, titleLen: title.length, contentLen: trimmed.length },
+            'FetchURL: done',
+          );
         } finally {
           await page.close();
         }
@@ -113,7 +129,8 @@ export function startApiProxy(targetOrigin: string): void {
 
     const fwdHeaders: Record<string, string | string[] | undefined> = {};
     for (const [key, val] of Object.entries(req.headers)) {
-      if (!HOP_BY_HOP.has(key.toLowerCase())) fwdHeaders[key] = val as string | string[] | undefined;
+      if (!HOP_BY_HOP.has(key.toLowerCase()))
+        fwdHeaders[key] = val as string | string[] | undefined;
     }
     fwdHeaders['host'] = target.host;
 
@@ -136,10 +153,16 @@ export function startApiProxy(targetOrigin: string): void {
       const proxyReq = transport.request(options, (proxyRes) => {
         if (proxyRes.statusCode && proxyRes.statusCode >= 400) {
           let respBody = '';
-          proxyRes.on('data', (chunk: Buffer) => { respBody += chunk.toString(); });
+          proxyRes.on('data', (chunk: Buffer) => {
+            respBody += chunk.toString();
+          });
           proxyRes.on('end', () => {
             logger.warn(
-              { status: proxyRes.statusCode, body: respBody.slice(0, 500), url: targetUrl },
+              {
+                status: proxyRes.statusCode,
+                body: respBody.slice(0, 500),
+                url: targetUrl,
+              },
               'API proxy: upstream returned error',
             );
             res.writeHead(proxyRes.statusCode!, proxyRes.headers);
