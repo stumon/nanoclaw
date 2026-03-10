@@ -44,10 +44,13 @@ export function startForwardProxy(): void {
       headers: { ...req.headers, host: parsed.host },
     };
 
-    const proxyReq = transport.request(options, (proxyRes: http.IncomingMessage) => {
-      res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
-      proxyRes.pipe(res);
-    });
+    const proxyReq = transport.request(
+      options,
+      (proxyRes: http.IncomingMessage) => {
+        res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+        proxyRes.pipe(res);
+      },
+    );
 
     proxyReq.on('error', (err: Error) => {
       logger.error({ err, url: targetUrl }, 'Forward proxy: upstream error');
@@ -61,28 +64,32 @@ export function startForwardProxy(): void {
   });
 
   // CONNECT method for HTTPS tunneling
-  server.on('connect', (req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer) => {
-    const [hostname, port] = (req.url || '').split(':');
-    const targetPort = parseInt(port, 10) || 443;
+  server.on(
+    'connect',
+    (req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer) => {
+      const [hostname, port] = (req.url || '').split(':');
+      const targetPort = parseInt(port, 10) || 443;
 
-    const targetSocket = net.connect(targetPort, hostname, () => {
-      clientSocket.write(
-        'HTTP/1.1 200 Connection Established\r\n\r\n',
-      );
-      targetSocket.write(head);
-      targetSocket.pipe(clientSocket);
-      clientSocket.pipe(targetSocket);
-    });
+      const targetSocket = net.connect(targetPort, hostname, () => {
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        targetSocket.write(head);
+        targetSocket.pipe(clientSocket);
+        clientSocket.pipe(targetSocket);
+      });
 
-    targetSocket.on('error', (err) => {
-      logger.error({ err, target: req.url }, 'Forward proxy: CONNECT tunnel error');
-      clientSocket.end();
-    });
+      targetSocket.on('error', (err) => {
+        logger.error(
+          { err, target: req.url },
+          'Forward proxy: CONNECT tunnel error',
+        );
+        clientSocket.end();
+      });
 
-    clientSocket.on('error', () => {
-      targetSocket.end();
-    });
-  });
+      clientSocket.on('error', () => {
+        targetSocket.end();
+      });
+    },
+  );
 
   server.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRNOTAVAIL') {

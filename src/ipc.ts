@@ -469,10 +469,7 @@ export async function processTaskIpc(
           ([, g]) => g.folder === sourceGroup,
         )?.[0];
 
-      logger.info(
-        { scriptName, sourceGroup },
-        'Running host script via IPC',
-      );
+      logger.info({ scriptName, sourceGroup }, 'Running host script via IPC');
 
       try {
         await new Promise<void>((resolve, reject) => {
