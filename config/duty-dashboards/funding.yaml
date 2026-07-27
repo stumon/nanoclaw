@@ -1,0 +1,114 @@
+name: "Funder 值班巡查"
+report_type: "funding"
+
+models:
+  - "QwQ-32B"
+  - "compressLM"
+
+grafana:
+  base_url: "https://monitoring.infra.sz.shopee.io/grafana"
+  dashboard_uid: "Ia35Utv4k"
+  org_id: 28
+  time_range_hours: 24
+  step_minutes: 15
+  max_data_points: 96
+
+query:
+  concurrency: 5
+  batch_size: 15
+  max_series_per_panel: 5
+  max_report_chars: 10000
+
+anomaly_rules:
+  - match_pattern: "MQ堆积|lag|积压|backlog"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 5000
+    critical_threshold: 50000
+    unit: ""
+    label_template: "{label} 堆积={value}"
+
+  - match_pattern: "CPU|cpu"
+    match_flags: "i"
+    field: "max"
+    warning_threshold: 80
+    critical_threshold: 90
+    unit: "%"
+    label_template: "{label} max={value}%"
+
+  - match_pattern: "内存|memory|mem"
+    match_flags: "i"
+    field: "max"
+    warning_threshold: 85
+    critical_threshold: 95
+    unit: "%"
+    label_template: "{label} max={value}%"
+
+  - match_pattern: "DB耗时|db.*耗时|latency|p50|p99"
+    match_flags: "i"
+    field: "max"
+    warning_threshold: 2000
+    critical_threshold: 10000
+    unit: "ms"
+    label_template: "{label} max={value}ms"
+
+  - match_pattern: "卡单|stuck|pending"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 0
+    critical_threshold: 0
+    invert_for_warning: true
+    unit: ""
+    label_template: "{label} 卡单={value}"
+
+  - match_pattern: "探活|health|alive"
+    match_flags: "i"
+    field: "latest"
+    below_threshold: true
+    warning_threshold: 10
+    critical_threshold: 10
+    unit: ""
+    label_template: "{label} 探活={value}"
+
+  - match_pattern: "KMS|kms"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: -1
+    critical_threshold: 0
+    equals_zero_critical: true
+    unit: ""
+    label_template: "{label} KMS获取失败"
+
+generic_detection:
+  z_score_threshold: 4
+  spike_count_threshold: 5
+  trend_pct_threshold: 100
+  min_absolute_value: 10
+  max_reasons_per_panel: 3
+
+output:
+  recipient_env: "FUNDING_DUTY_RECIPIENT"
+  fallback_recipient: "huanyu.guo@shopee.com"
+  subject_template: "[值班巡查] {today} {name}{critical_tag}"
+  ipc_chat_jid: "8619860743536@s.whatsapp.net"
+
+prompt:
+  role: "金融科技 Funding 值班数据分析师"
+  dashboard_description: "A大促监控 Dashboard"
+  stage1_example: |
+    MQ消费/topic-payment 堆积 | 严重 | 下游消费者停滞导致积压12000
+    DB耗时/payment-db P99 | 告警 | 慢查询增多，P99从50ms升至200ms
+  stage2_example: |
+    [总体风险] 中
+    [一句话总结] MQ堆积导致部分支付处理延迟，但未影响核心链路
+
+    [异常分析]
+    异常1: MQ消费/topic-payment 堆积 | 原因: 下游消费者可能重启或GC | 建议: 检查消费者pod状态 | 紧急度: 持续观察
+    异常2: DB耗时/payment-db P99上升 | 原因: 慢查询增多 | 建议: 检查慢查询日志 | 紧急度: 持续观察
+
+    [关联发现]
+    MQ堆积与DB耗时上升可能相关：DB响应变慢导致消费者变慢，进而堆积
+
+    [值班行动]
+    1. 检查 payment-db 慢查询和连接池状态
+    2. 观察MQ堆积是否随DB恢复而消化

@@ -113,18 +113,21 @@ Steps:
 
 Both messages are mandatory (English first, then Chinese). Total items should be 15-20.
 
-## On-Duty Report (值班日报)
+## 值班日报
 
-CRITICAL RULE: Every message containing 值班/邮件/日报/报告 keywords MUST call the tool below. You MUST call it EVERY TIME, even if you already called it 1 minute ago in this same conversation. NEVER skip the tool call. NEVER replace the tool call with a text-only response. NEVER say "已触发" or "正在生成" without actually calling the tool first.
+当前已暂停 WhatsApp 关键词自动触发值班脚本与发邮件（config 目录下存在 duty-reports.paused 标记文件，恢复时间待定）。用户若仍问值班命令，说明已暂停，并告知可在 Cursor 里按 skill 手动跑采集与发信脚本。
 
-Trigger words: "值班报告", "值班邮件", "值班日报", "发值班邮件", "发送值班邮件", "发送值班日报", "发值班日报", "on-duty report", "值班数据", "发送邮件"
+若将来恢复自动发送，删除 config/duty-reports.paused 后重启 NanoClaw 即可（也可用环境变量 NANOCLAW_DUTY_REPORTS_DISABLED 控制）。
 
-Action — call this tool FIRST, then reply:
-`mcp__nanoclaw__run_host_script({ script_name: "on-duty-report.ts" })`
+值班日报原本由宿主机在匹配关键词时自动运行脚本。暂停期间不会自动运行。
 
-Do NOT ask for details. Do NOT deduplicate. Do NOT count how many times it was triggered. Just call the tool every single time.
+如果用户问起值班命令，告知（暂停状态下自动发送不可用，仅手动）：
+- 发 UC 值班邮件：说 "uc值班邮件" 或 "值班日报" 或 "发值班邮件"
+- 发 Funding 值班邮件：说 "funding值班邮件" 或 "大促值班" 或 "funding日报"
+- 两个都发：说 "uc和funding值班邮件"
 
-If user pastes data directly, read `/workspace/project/.claude/skills/on-duty/SKILL.md` for fallback instructions.
+用户直接粘贴 UC 值班数据时，读取 /workspace/project/.claude/skills/on-duty/SKILL.md 获取手动分析指引。
+用户直接粘贴 Funding 监控数据时，读取 /workspace/project/.claude/skills/funding-duty/SKILL.md 获取手动分析指引。
 
 ## Stock Screener (Quantitative Stock Analysis)
 

@@ -8,8 +8,7 @@
  *   3. Detect "结束发送" → run pipeline:
  *      a. Vision model analyzes each image
  *      b. LLM extracts structured JSON from analyses
- *      c. node patch-assets.js --data JSON
- *      d. node update_all_assets.js
+ *      c. npx tsx scripts/update-lark-assets.ts --data JSON
  *   4. Send result to user
  */
 import fs from 'fs';
@@ -20,11 +19,6 @@ import { logger } from './logger.js';
 
 const TRIGGER_RE = /更新资产|更新持仓|更新飞书资产/;
 const END_RE = /结束发送/;
-
-const STOCK_LARK_DIR = path.resolve(
-  process.env.HOME || '/Users/huanyu.guo',
-  'self/stock/lark',
-);
 
 interface AssetSession {
   chatJid: string;
@@ -524,6 +518,132 @@ function runScript(
 
 // ── Main pipeline ──────────────────────────────────────────────────
 
+// ─── Transformation ────────────────────────────────────────────────
+function transformToUpdateFormat(extracted: Record<string, any>): {
+  platforms: any[];
+} {
+  const platforms: any[] = [];
+
+  // Galaxy -> 中国银河证券
+  if (extracted.galaxy) {
+    platforms.push({
+      name: '中国银河证券',
+      mode: 'replace',
+      holdings: (extracted.galaxy.holdings || []).map((h: any) => ({
+        asset: h.name,
+        assetType: h.assetType,
+        quantity: h.quantity,
+        priceCNY: h.priceCNY || h.price || 0,
+      })),
+      cash: extracted.galaxy.cash,
+    });
+  }
+
+  // Huatai -> 华泰证券
+  if (extracted.huatai) {
+    platforms.push({
+      name: '华泰证券',
+      mode: 'replace',
+      holdings: (extracted.huatai.holdings || []).map((h: any) => ({
+        asset: h.name,
+        assetType: h.assetType,
+        quantity: h.quantity,
+        priceCNY: h.priceCNY || h.price || 0,
+      })),
+      cash: extracted.huatai.cash,
+    });
+  }
+
+  // Chuancai -> 川财证券
+  if (extracted.chuancai) {
+    platforms.push({
+      name: '川财证券',
+      mode: 'replace',
+      holdings: (extracted.chuancai.holdings || []).map((h: any) => ({
+        asset: h.name,
+        assetType: h.assetType,
+        quantity: h.quantity,
+        priceCNY: h.priceCNY || h.price || 0,
+      })),
+      cash: extracted.chuancai.cash,
+    });
+  }
+
+  // IBKR -> 盈透证券
+  if (extracted.ibkr) {
+    platforms.push({
+      name: '盈透证券',
+      mode: 'replace',
+      holdings: (extracted.ibkr.holdings || []).map((h: any) => ({
+        asset: h.name,
+        assetType: h.assetType,
+        quantity: h.quantity,
+        priceCNY: (h.priceUSD || 0) * 7.0, // Convert USD price to CNY
+      })),
+      cash: extracted.ibkr.cash,
+      cashCurrency: 'USD',
+      cashRate: 7.0,
+    });
+  }
+
+  // Alipay -> 支付宝
+  if (extracted.alipay) {
+    const p = {
+      name: '支付宝',
+      mode: 'upsert',
+      holdings: [] as any[],
+    };
+    if (extracted.alipay.cash) {
+      p.holdings.push({
+        asset: '余额宝',
+        assetType: '货币基金',
+        quantity: extracted.alipay.cash,
+        priceCNY: 1.0,
+      });
+    }
+    if (extracted.alipay.fund) {
+      p.holdings.push({
+        asset: '基金组合',
+        assetType: '基金',
+        quantity: extracted.alipay.fund,
+        priceCNY: 1.0,
+      });
+    }
+    platforms.push(p);
+  }
+
+  // YunShanFu -> 云闪付
+  if (extracted.yunShanFu) {
+    const val =
+      typeof extracted.yunShanFu === 'number'
+        ? extracted.yunShanFu
+        : extracted.yunShanFu.cash;
+    platforms.push({
+      name: '云闪付',
+      mode: 'upsert',
+      holdings: [],
+      cash: val,
+    });
+  }
+
+  // ZhaoShang -> 招商银行
+  if (extracted.zhaoShang) {
+    const val =
+      typeof extracted.zhaoShang === 'number'
+        ? extracted.zhaoShang
+        : extracted.zhaoShang.fund;
+    platforms.push({
+      name: '招商银行',
+      mode: 'upsert',
+      holdings: [
+        { asset: '基金', assetType: '基金', quantity: val, priceCNY: 1.0 },
+      ],
+    });
+  }
+
+  return { platforms };
+}
+
 export async function processAssetUpdate(chatJid: string): Promise<string> {
   const session = sessions.get(chatJid);
   if (!session) return '没有进行中的资产更新会话。';
@@ -633,36 +753,31 @@ export async function processAssetUpdate(chatJid: string): Promise<string> {
     /* ignore */
   }
 
-  // Step 3: Patch assets
-  const jsonStr = JSON.stringify(json);
-  logger.info({ dataLength: jsonStr.length }, 'Running patch-assets.js');
+  // Step 3: Transform and Update
+  const transformed = transformToUpdateFormat(json);
+  const jsonStr = JSON.stringify(transformed);
 
-  const patchResult = await runScript(STOCK_LARK_DIR, 'node', [
-    'patch-assets.js',
+  logger.info(
+    {
+      platforms: transformed.platforms.map((p) => p.name),
+      dataLength: jsonStr.length,
+    },
+    'Running scripts/update-lark-assets.ts',
+  );
+
+  const scriptPath = path.join(process.cwd(), 'scripts/update-lark-assets.ts');
+
+  const updateResult = await runScript(process.cwd(), 'npx', [
+    'tsx',
+    scriptPath,
     '--data',
     jsonStr,
-  ]);
-
-  if (patchResult.exitCode !== 0) {
-    logger.error(
-      { exitCode: patchResult.exitCode, stderr: patchResult.stderr },
-      'patch-assets.js failed',
-    );
-    return `资产数据写入失败：\n${patchResult.stderr || patchResult.stdout}`;
-  }
-
-  logger.info({ output: patchResult.stdout.trim() }, 'patch-assets.js done');
-
-  // Step 4: Run update script
-  logger.info('Running update_all_assets.js');
-  const updateResult = await runScript(STOCK_LARK_DIR, 'node', [
-    'update_all_assets.js',
   ]);
 
   if (updateResult.exitCode !== 0) {
     logger.error(
       { exitCode: updateResult.exitCode, stderr: updateResult.stderr },
-      'update_all_assets.js failed',
+      'update-lark-assets.ts failed',
     );
     return `飞书更新失败：\n${(updateResult.stderr || updateResult.stdout).slice(0, 500)}`;
   }
@@ -673,13 +788,16 @@ export async function processAssetUpdate(chatJid: string): Promise<string> {
   const lines: string[] = ['资产更新完成！'];
   lines.push('');
   lines.push(`已更新平台：${platforms.join('、')}`);
-  lines.push(patchResult.stdout.trim());
 
   const updateOutput = updateResult.stdout.trim();
   if (updateOutput) {
-    const lastLines = updateOutput.split('\n').slice(-10).join('\n');
-    lines.push('');
-    lines.push(lastLines);
+    const summaryIdx = updateOutput.indexOf('=== Summary ===');
+    if (summaryIdx >= 0) {
+      lines.push(updateOutput.slice(summaryIdx));
+    } else {
+      const lastLines = updateOutput.split('\n').slice(-10).join('\n');
+      lines.push(lastLines);
+    }
   }
 
   return lines.join('\n');

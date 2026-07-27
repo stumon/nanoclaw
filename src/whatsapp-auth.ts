@@ -30,6 +30,7 @@ const logger = pino({
 
 // Check for --pairing-code flag and phone number
 const usePairingCode = process.argv.includes('--pairing-code');
+const forceReauth = process.argv.includes('--force');
 const phoneArg = process.argv.find((_, i, arr) => arr[i - 1] === '--phone');
 
 function askQuestion(prompt: string): Promise<string> {
@@ -51,11 +52,11 @@ async function connectSocket(
 ): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
-  if (state.creds.registered && !isReconnect) {
+  if (state.creds.registered && !isReconnect && !forceReauth) {
     fs.writeFileSync(STATUS_FILE, 'already_authenticated');
     console.log('✓ Already authenticated with WhatsApp');
     console.log(
-      '  To re-authenticate, delete the store/auth folder and run again.',
+      '  若连接仍 401 登出，请运行: npx tsx src/whatsapp-auth.ts --force',
     );
     process.exit(0);
   }
@@ -115,7 +116,13 @@ async function connectSocket(
 
       if (reason === DisconnectReason.loggedOut) {
         fs.writeFileSync(STATUS_FILE, 'failed:logged_out');
-        console.log('\n✗ Logged out. Delete store/auth and try again.');
+        console.log('\n✗ 会话已失效（401 logged out）');
+        console.log('  请重新认证: npx tsx src/whatsapp-auth.ts --force');
+        if (usePairingCode) {
+          console.log(
+            '  或使用配对码: npx tsx src/whatsapp-auth.ts --force --pairing-code --phone 8619860743536',
+          );
+        }
         process.exit(1);
       } else if (reason === DisconnectReason.timedOut) {
         fs.writeFileSync(STATUS_FILE, 'failed:qr_timeout');
@@ -153,6 +160,15 @@ async function connectSocket(
 
 async function authenticate(): Promise<void> {
   fs.mkdirSync(AUTH_DIR, { recursive: true });
+
+  if (forceReauth) {
+    const backup = `${AUTH_DIR}.bak.${Date.now()}`;
+    if (fs.existsSync(AUTH_DIR)) {
+      fs.renameSync(AUTH_DIR, backup);
+      console.log(`⟳ 已备份旧凭证到 ${backup}`);
+      fs.mkdirSync(AUTH_DIR, { recursive: true });
+    }
+  }
 
   // Clean up any stale QR/status files from previous runs
   try {

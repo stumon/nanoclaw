@@ -1,0 +1,176 @@
+name: "Funding Platform 值班巡查"
+report_type: "funding-platform"
+
+models:
+  - "QwQ-32B"
+  - "compass-max"
+
+grafana:
+  base_url: "https://monitoring.infra.sz.shopee.io/grafana"
+  dashboard_uid: "6SAKQReSk"        # 卡单监控大盘
+  additional_uids:
+    - "ELg2EXqIk"                   # 资损类指标（Due day校验、对账、结清）
+  org_id: 28
+  time_range_hours: 24
+  step_minutes: 15
+  max_data_points: 96
+  datasource_uid_map:
+    "Funding-ID-ES": "6f9KfMO4z"
+    "Funding-LDN-ES": "ato4opYVz"
+    "Funding-BR-ES": "LrafNTOVk"
+    "UC-MY-ElasticSearch": "HdkeTUHnz"
+    "Funding-PH-ES": "FyNVDTO4k"
+    "UC-TH-ElasticSearch": "HRnB28Nnk"
+    "Funding-VN-ES": "5xdsNTd4k"
+    "Funding-SG-ES": "88P76xeIz"
+
+query:
+  concurrency: 5
+  batch_size: 15
+  max_series_per_panel: 10
+  max_report_chars: 10000
+
+anomaly_rules:
+  # 紧急: 还款内部卡单超3小时
+  - match_pattern: "内部还款卡单|内部卡单.*还款"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 0
+    critical_threshold: 5
+    invert_for_warning: true
+    unit: ""
+    label_template: "{label} 内部还款卡单={value}"
+
+  # 紧急: 新交易卡单超1天
+  - match_pattern: "新交易卡单|transaction.*卡单"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 0
+    critical_threshold: 10
+    invert_for_warning: true
+    unit: ""
+    label_template: "{label} 新交易卡单={value}"
+
+  # 紧急: 放款内部卡单超1天
+  - match_pattern: "放款内部卡单"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 0
+    critical_threshold: 5
+    invert_for_warning: true
+    unit: ""
+    label_template: "{label} 放款内部卡单={value}"
+
+  # loan卡单（还款减免退款赎回超2天）
+  - match_pattern: "loan卡单"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 0
+    critical_threshold: 20
+    invert_for_warning: true
+    unit: ""
+    label_template: "{label} loan卡单={value}"
+
+  # 放款外部卡单超5天
+  - match_pattern: "放款外部卡单|confirm卡单"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 0
+    critical_threshold: 50
+    invert_for_warning: true
+    unit: ""
+    label_template: "{label} 放款外部卡单={value}"
+
+  # 还款退款卡单超5天
+  - match_pattern: "还款卡单|退款卡单"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 0
+    critical_threshold: 50
+    invert_for_warning: true
+    unit: ""
+    label_template: "{label} 卡单={value}"
+
+  # 逾期代偿计费卡单超5天
+  - match_pattern: "逾期卡单|代偿卡单|计费卡单"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 0
+    critical_threshold: 50
+    invert_for_warning: true
+    unit: ""
+    label_template: "{label} 卡单={value}"
+
+  # 赎回卡单
+  - match_pattern: "赎回卡单"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 0
+    critical_threshold: 20
+    invert_for_warning: true
+    unit: ""
+    label_template: "{label} 赎回卡单={value}"
+
+  # 合同状态卡在SEND_MQ超5天
+  - match_pattern: "合同状态"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 0
+    critical_threshold: 10
+    invert_for_warning: true
+    unit: ""
+    label_template: "{label} 合同卡单={value}"
+
+  # DueDay校验异常
+  - match_pattern: "DueDay|Due.*day"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 0
+    critical_threshold: 5
+    invert_for_warning: true
+    unit: ""
+    label_template: "{label} DueDay异常={value}"
+
+  # 未处理对账任务
+  - match_pattern: "对账任务|对账"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 0
+    critical_threshold: 50
+    invert_for_warning: true
+    unit: ""
+    label_template: "{label} 未处理对账={value}"
+
+generic_detection:
+  z_score_threshold: 4
+  spike_count_threshold: 5
+  trend_pct_threshold: 100
+  min_absolute_value: 1
+  max_reasons_per_panel: 3
+
+output:
+  recipient_env: "FUNDING_PLATFORM_DUTY_RECIPIENT"
+  fallback_recipient: "huanyu.guo@shopee.com"
+  subject_template: "[值班巡查] {today} {name}{critical_tag}"
+  ipc_chat_jid: "8619860743536@s.whatsapp.net"
+
+prompt:
+  role: "金融科技 Funding Platform 值班数据分析师"
+  dashboard_description: "卡单监控大盘 + 资损类指标"
+  stage1_example: |
+    VN-内部还款卡单 | 严重 | 内部还款卡单3笔超3小时未处理
+    ID-CF-放款外部卡单 | 告警 | 外部放款卡单20笔超5天，需关注资方响应
+  stage2_example: |
+    [总体风险] 中
+    [一句话总结] VN内部还款卡单需紧急处理，其余卡单数量在可控范围
+
+    [异常分析]
+    异常1: VN-内部还款卡单 | 原因: 可能是还款处理链路超时 | 建议: 检查还款服务日志和资方回调 | 紧急度: 立即处理
+    异常2: ID-CF-放款外部卡单 | 原因: 资方侧处理延迟 | 建议: 联系资方确认处理进度 | 紧急度: 持续观察
+
+    [关联发现]
+    内部卡单和外部卡单可能共享相同的下游资方处理瓶颈
+
+    [值班行动]
+    1. 优先处理VN内部还款卡单
+    2. 跟进ID-CF放款外部卡单的资方响应

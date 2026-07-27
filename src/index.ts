@@ -59,6 +59,7 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 import { isStockDailyRerunCommand } from './commands/stock-daily.js';
+import { autoTriggerDutyScripts } from './commands/duty-report.js';
 import {
   isAssetTrigger,
   isEndTrigger,
@@ -311,6 +312,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       group,
     );
     if (handled) return true;
+  }
+
+  // Auto-trigger duty report scripts based on keywords (all groups).
+  // Runs scripts on the host directly — does not depend on agent tool calling.
+  {
+    const dutyHandled = await autoTriggerDutyScripts(
+      missedMessages,
+      chatJid,
+      channel,
+    );
+    if (dutyHandled) {
+      lastAgentTimestamp[chatJid] =
+        missedMessages[missedMessages.length - 1].timestamp;
+      saveState();
+      return true;
+    }
   }
 
   // Main group admin command: rerun today's stock data push.

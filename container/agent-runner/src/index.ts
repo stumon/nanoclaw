@@ -49,6 +49,39 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 const MAX_TOOL_ITERATIONS = 50;
 const MAX_TOOL_OUTPUT_CHARS = 30000;
 const CWD = '/workspace/group';
+const SESSION_HISTORY_PATH = path.join(CWD, '.session_history.json');
+const COMPACTION_TOKEN_THRESHOLD = 60000;
+const COMPACTION_KEEP_RATIO = 0.2;
+
+// ─── Multi-Agent State ───────────────────────────────────────────────────────
+
+interface BackgroundTask {
+  id: string;
+  description: string;
+  status: 'running' | 'completed' | 'failed';
+  result?: string;
+}
+const backgroundTasks = new Map<string, BackgroundTask>();
+
+interface TeammateState {
+  name: string;
+  role: string;
+  status: 'active' | 'stopped';
+  conversationHistory: ChatCompletionMessageParam[];
+  pendingInbox: string[];
+  outbox: string[];
+  processing: boolean;
+}
+const teammates = new Map<string, TeammateState>();
+
+// Module-level references set in main(), used by team/background tool execution
+let moduleClient: OpenAI;
+let moduleModelName: string;
+let moduleMcpClient: McpClient | null = null;
+let moduleGmailClient: McpClient | null = null;
+let moduleTools: ChatCompletionTool[] = [];
+
+const TEAM_EXCLUDED_TOOLS = ['Task', 'TeamCreate', 'SendMessage', 'ReadTeamMessages', 'TeamShutdown', 'BackgroundTaskStatus'];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -389,6 +422,94 @@ const BUILTIN_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'Task',
+      description: 'Launch a sub-agent to handle a specific task independently. The sub-agent has access to all tools (Bash, Read, Write, WebSearch, etc.) but cannot launch further sub-agents. Use this to parallelize work — call multiple Task tools in a single turn and they will execute concurrently. Set run_in_background=true to launch asynchronously and check results later with BackgroundTaskStatus.',
+      parameters: {
+        type: 'object',
+        properties: {
+          description: { type: 'string', description: 'Short description of what this sub-agent should do (3-5 words)' },
+          prompt: { type: 'string', description: 'Detailed instructions for the sub-agent. Include all necessary context — the sub-agent has no access to the parent conversation.' },
+          run_in_background: { type: 'string', description: 'Set to "true" to launch the sub-agent in the background and return immediately with a task_id. Use BackgroundTaskStatus to check results later. Default: not set (synchronous).' },
+        },
+        required: ['description', 'prompt'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'BackgroundTaskStatus',
+      description: 'Check the status and results of background tasks launched with Task(run_in_background=true). Returns status (running/completed/failed) and result text for completed tasks. Call with task_id for a specific task or without arguments for all tasks.',
+      parameters: {
+        type: 'object',
+        properties: {
+          task_id: { type: 'string', description: 'Specific task ID to check. If omitted, returns status of all background tasks.' },
+        },
+        required: ['task_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'TeamCreate',
+      description: 'Create a persistent teammate agent. Teammates maintain their own conversation history across multiple messages, unlike Task which is one-shot. Use SendMessage to communicate with teammates, ReadTeamMessages to get their replies, and TeamShutdown to dismiss them.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Unique name for the teammate (e.g. "researcher", "coder", "reviewer")' },
+          role: { type: 'string', description: 'Description of the teammate\'s role and expertise. This becomes part of their system prompt.' },
+        },
+        required: ['name', 'role'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'SendMessage',
+      description: 'Send a message to a teammate. The teammate will process the message asynchronously using their own agent loop and tools. Their reply will be available via ReadTeamMessages.',
+      parameters: {
+        type: 'object',
+        properties: {
+          to: { type: 'string', description: 'Name of the teammate to send the message to' },
+          message: { type: 'string', description: 'The message content to send' },
+        },
+        required: ['to', 'message'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'ReadTeamMessages',
+      description: 'Read all unread messages from teammates. Returns messages from all teammates that have replied since the last read. Messages are cleared after reading.',
+      parameters: {
+        type: 'object',
+        properties: {
+          filter: { type: 'string', description: 'Teammate name to filter messages from. If set to "all" or omitted, returns messages from all teammates.' },
+        },
+        required: ['filter'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'TeamShutdown',
+      description: 'Shut down a teammate. Their conversation history is discarded. Use when a teammate\'s task is complete.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Name of the teammate to shut down' },
+        },
+        required: ['name'],
+      },
+    },
+  },
 ];
 
 // ─── Schema Sanitizer ────────────────────────────────────────────────────────
@@ -629,11 +750,122 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
         }
       }
 
+      case 'BackgroundTaskStatus': {
+        const taskId = args.task_id as string | undefined;
+        if (taskId) {
+          const task = backgroundTasks.get(taskId);
+          if (!task) return `No background task found with id: ${taskId}`;
+          return JSON.stringify(task);
+        }
+        if (backgroundTasks.size === 0) return 'No background tasks.';
+        const all = Array.from(backgroundTasks.values()).map(t => ({
+          id: t.id, description: t.description, status: t.status,
+          result: t.status !== 'running' ? t.result?.slice(0, 500) : undefined,
+        }));
+        return JSON.stringify(all, null, 2);
+      }
+
+      case 'TeamCreate': {
+        const tmName = args.name as string;
+        const role = args.role as string;
+        if (!tmName || !role) return 'Error: name and role are required';
+        if (teammates.has(tmName)) return `Teammate "${tmName}" already exists. Use SendMessage to communicate.`;
+        teammates.set(tmName, {
+          name: tmName,
+          role,
+          status: 'active',
+          conversationHistory: [],
+          pendingInbox: [],
+          outbox: [],
+          processing: false,
+        });
+        log(`Teammate "${tmName}" created with role: ${role}`);
+        return `Teammate "${tmName}" created. Use SendMessage to assign tasks.`;
+      }
+
+      case 'SendMessage': {
+        const to = args.to as string;
+        const message = args.message as string;
+        if (!to || !message) return 'Error: to and message are required';
+        const tm = teammates.get(to);
+        if (!tm) return `Teammate "${to}" not found. Available: ${Array.from(teammates.keys()).join(', ') || '(none)'}`;
+        if (tm.status === 'stopped') return `Teammate "${to}" has been shut down.`;
+        tm.pendingInbox.push(message);
+        log(`Message queued to teammate "${to}" (${message.length} chars)`);
+        processTeammateMessage(to).catch(err => log(`Teammate "${to}" processing error: ${err}`));
+        return `Message sent to "${to}". Their reply will be available via ReadTeamMessages.`;
+      }
+
+      case 'ReadTeamMessages': {
+        const collected: string[] = [];
+        for (const [name, tm] of teammates) {
+          while (tm.outbox.length > 0) {
+            collected.push(tm.outbox.shift()!);
+          }
+          if (tm.processing) {
+            collected.push(`[${name}]: (still processing...)`);
+          }
+        }
+        if (collected.length === 0) return 'No unread messages from teammates.';
+        return collected.join('\n\n');
+      }
+
+      case 'TeamShutdown': {
+        const tmName = args.name as string;
+        if (!tmName) return 'Error: name is required';
+        const tm = teammates.get(tmName);
+        if (!tm) return `Teammate "${tmName}" not found.`;
+        tm.status = 'stopped';
+        tm.pendingInbox.length = 0;
+        log(`Teammate "${tmName}" shut down`);
+        const remaining = tm.outbox.length > 0
+          ? ` They had ${tm.outbox.length} unread message(s) — use ReadTeamMessages to retrieve them.`
+          : '';
+        return `Teammate "${tmName}" has been shut down.${remaining}`;
+      }
+
       default:
         return `Error: Unknown tool: ${name}`;
     }
   } catch (err) {
     return `Error executing ${name}: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+// ─── Teammate Processing ─────────────────────────────────────────────────────
+
+async function processTeammateMessage(name: string): Promise<void> {
+  const tm = teammates.get(name);
+  if (!tm || tm.processing || tm.status === 'stopped') return;
+  tm.processing = true;
+
+  try {
+    while (tm.pendingInbox.length > 0) {
+      const msg = tm.pendingInbox.shift()!;
+      tm.conversationHistory.push({ role: 'user', content: `[Message from leader]: ${msg}` });
+
+      const subSystemPrompt = `You are "${tm.name}", a team member with role: ${tm.role}.\nWorking directory: ${CWD}\nYou work as part of a team. Process the leader's request and return a concise result. You cannot create sub-agents or teams.`;
+      const apiMessages: ChatCompletionMessageParam[] = [
+        { role: 'system', content: subSystemPrompt },
+        ...tm.conversationHistory,
+      ];
+      const toolsForTeammate = moduleTools.filter(t => !TEAM_EXCLUDED_TOOLS.includes(t.function.name));
+
+      const result = await runAgentLoop(moduleClient, moduleModelName, apiMessages, toolsForTeammate, moduleMcpClient, moduleGmailClient);
+
+      tm.conversationHistory.length = 0;
+      for (let i = 1; i < apiMessages.length; i++) {
+        tm.conversationHistory.push(apiMessages[i]);
+      }
+
+      tm.outbox.push(`[${tm.name}]: ${result || '(no output)'}`);
+      log(`Teammate "${tm.name}" produced response (${(result || '').length} chars)`);
+    }
+  } catch (err) {
+    tm.outbox.push(`[${tm.name}] Error: ${err instanceof Error ? err.message : String(err)}`);
+    log(`Teammate "${tm.name}" error: ${err}`);
+  } finally {
+    tm.processing = false;
   }
 }
 
@@ -743,7 +975,17 @@ async function runAgentLoop(
       const toolCalls = assistantMsg.tool_calls || [];
       log(`Tool calls: ${toolCalls.map((tc: ChatCompletionMessageToolCall) => tc.function.name).join(', ')}`);
 
-      for (const toolCall of toolCalls) {
+      const taskCalls: ChatCompletionMessageToolCall[] = [];
+      const regularCalls: ChatCompletionMessageToolCall[] = [];
+      for (const tc of toolCalls) {
+        if (tc.function.name === 'Task') {
+          taskCalls.push(tc);
+        } else {
+          regularCalls.push(tc);
+        }
+      }
+
+      const executeOneToolCall = async (toolCall: ChatCompletionMessageToolCall): Promise<{ id: string; result: string }> => {
         const fnName = toolCall.function.name;
         let fnArgs: Record<string, unknown>;
         try {
@@ -755,7 +997,6 @@ async function runAgentLoop(
 
         let result: string;
 
-        // Check if it's an MCP tool (prefixed with mcp__)
         if (fnName.startsWith('mcp__nanoclaw__') && mcpClient) {
           const mcpToolName = fnName.replace('mcp__nanoclaw__', '');
           log(`Calling MCP tool: ${mcpToolName}`);
@@ -778,12 +1019,72 @@ async function runAgentLoop(
         }
 
         log(`Tool ${fnName} result: ${result.slice(0, 200)}${result.length > 200 ? '...' : ''}`);
+        return { id: toolCall.id, result };
+      };
 
-        messages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: result,
-        });
+      const executeTaskCall = async (toolCall: ChatCompletionMessageToolCall): Promise<{ id: string; result: string }> => {
+        let fnArgs: Record<string, unknown>;
+        try {
+          fnArgs = JSON.parse(toolCall.function.arguments);
+        } catch {
+          fnArgs = {};
+        }
+        const desc = (fnArgs.description as string) || 'sub-task';
+        const prompt = (fnArgs.prompt as string) || '';
+        const runInBackground = fnArgs.run_in_background === 'true' || fnArgs.run_in_background === true;
+
+        const toolsForSub = tools.filter(t => !TEAM_EXCLUDED_TOOLS.includes(t.function.name));
+        const subSystemPrompt = `You are a sub-agent working on a specific task. You have access to all tools except launching further sub-agents or teams.\n\nWorking directory: ${CWD}\n\nComplete the task below and return a concise result.`;
+        const subMessages: ChatCompletionMessageParam[] = [
+          { role: 'system', content: subSystemPrompt },
+          { role: 'user', content: prompt },
+        ];
+
+        if (runInBackground) {
+          const taskId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          backgroundTasks.set(taskId, { id: taskId, description: desc, status: 'running' });
+          log(`Launching background sub-agent: "${desc}" (${taskId})`);
+
+          runAgentLoop(client, modelName, subMessages, toolsForSub, mcpClient, gmailClient)
+            .then(result => {
+              const task = backgroundTasks.get(taskId);
+              if (task) { task.status = 'completed'; task.result = result || '(no output)'; }
+              log(`Background task "${desc}" (${taskId}) completed`);
+            })
+            .catch(err => {
+              const task = backgroundTasks.get(taskId);
+              if (task) { task.status = 'failed'; task.result = err instanceof Error ? err.message : String(err); }
+              log(`Background task "${desc}" (${taskId}) failed: ${err}`);
+            });
+
+          return { id: toolCall.id, result: JSON.stringify({ status: 'launched', task_id: taskId, description: desc }) };
+        }
+
+        log(`Launching sync sub-agent: "${desc}"`);
+        try {
+          const subResult = await runAgentLoop(client, modelName, subMessages, toolsForSub, mcpClient, gmailClient);
+          log(`Sub-agent "${desc}" completed`);
+          return { id: toolCall.id, result: subResult || '(sub-agent returned no output)' };
+        } catch (err) {
+          const errMsg = `Sub-agent "${desc}" failed: ${err instanceof Error ? err.message : String(err)}`;
+          log(errMsg);
+          return { id: toolCall.id, result: errMsg };
+        }
+      };
+
+      // Execute regular tools sequentially
+      for (const tc of regularCalls) {
+        const { id, result } = await executeOneToolCall(tc);
+        messages.push({ role: 'tool', tool_call_id: id, content: result });
+      }
+
+      // Execute Task calls in parallel
+      if (taskCalls.length > 0) {
+        log(`Executing ${taskCalls.length} Task call(s) in parallel`);
+        const taskResults = await Promise.all(taskCalls.map(tc => executeTaskCall(tc)));
+        for (const { id, result } of taskResults) {
+          messages.push({ role: 'tool', tool_call_id: id, content: result });
+        }
       }
 
       continue;
@@ -921,6 +1222,134 @@ async function parseMultimodalContent(
   return parts.length === 1 && parts[0].type === 'text' ? (parts[0] as { type: 'text'; text: string }).text : parts;
 }
 
+// ─── Compaction ──────────────────────────────────────────────────────────────
+
+function estimateTokens(messages: ChatCompletionMessageParam[]): number {
+  let chars = 0;
+  for (const msg of messages) {
+    if (typeof msg.content === 'string') {
+      chars += msg.content.length;
+    } else if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if ('text' in part) chars += (part as { text: string }).text.length;
+      }
+    }
+    if ('tool_calls' in msg && msg.tool_calls) {
+      for (const tc of msg.tool_calls as ChatCompletionMessageToolCall[]) {
+        chars += tc.function.name.length + tc.function.arguments.length;
+      }
+    }
+  }
+  return Math.ceil(chars / 4);
+}
+
+async function compactHistory(
+  client: OpenAI,
+  modelName: string,
+  history: ChatCompletionMessageParam[],
+): Promise<ChatCompletionMessageParam[]> {
+  const estimated = estimateTokens(history);
+  if (estimated < COMPACTION_TOKEN_THRESHOLD || history.length < 6) {
+    return history;
+  }
+
+  log(`Compaction triggered: ~${estimated} tokens, ${history.length} messages`);
+
+  const keepCount = Math.max(4, Math.ceil(history.length * COMPACTION_KEEP_RATIO));
+  const toCompact = history.slice(0, history.length - keepCount);
+  const toKeep = history.slice(history.length - keepCount);
+
+  const summaryLines: string[] = [];
+  for (const msg of toCompact) {
+    const role = msg.role;
+    let text = '';
+    if (typeof msg.content === 'string') {
+      text = msg.content.slice(0, 500);
+    } else if (Array.isArray(msg.content)) {
+      text = (msg.content as Array<{ text?: string }>)
+        .filter(p => p.text)
+        .map(p => p.text!.slice(0, 300))
+        .join(' ');
+    }
+    if ('tool_calls' in msg && msg.tool_calls) {
+      const calls = (msg.tool_calls as ChatCompletionMessageToolCall[])
+        .map(tc => tc.function.name)
+        .join(', ');
+      text += ` [tools: ${calls}]`;
+    }
+    if (text) summaryLines.push(`${role}: ${text}`);
+  }
+
+  try {
+    const res = await client.chat.completions.create({
+      model: modelName,
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a conversation summarizer. Summarize the following conversation history into a concise summary preserving key facts, decisions, and context. Output only the summary in the same language as the conversation. Keep it under 800 words.',
+        },
+        {
+          role: 'user',
+          content: summaryLines.join('\n'),
+        },
+      ],
+      max_tokens: 2048,
+    });
+
+    const summary = res.choices[0]?.message?.content || '';
+    if (!summary) {
+      log('Compaction: LLM returned empty summary, falling back to truncation');
+      return history.slice(-keepCount);
+    }
+
+    log(`Compaction complete: ${toCompact.length} messages → summary (${summary.length} chars), kept ${toKeep.length} recent messages`);
+
+    return [
+      { role: 'user', content: `[Previous conversation summary]\n${summary}` },
+      { role: 'assistant', content: 'Understood, I have the context from our previous conversation.' },
+      ...toKeep,
+    ];
+  } catch (err) {
+    log(`Compaction LLM call failed: ${err instanceof Error ? err.message : String(err)}, falling back to truncation`);
+    return history.slice(-keepCount);
+  }
+}
+
+// ─── Session Persistence ─────────────────────────────────────────────────────
+
+function saveSessionHistory(history: ChatCompletionMessageParam[]): void {
+  try {
+    const serializable = history.map(msg => {
+      if (typeof msg.content === 'string' || msg.content === null) return msg;
+      if (Array.isArray(msg.content)) {
+        const textParts = (msg.content as Array<{ type: string; text?: string }>)
+          .filter(p => p.type === 'text' && p.text)
+          .map(p => p.text)
+          .join('\n');
+        return { ...msg, content: textParts };
+      }
+      return msg;
+    });
+    fs.writeFileSync(SESSION_HISTORY_PATH, JSON.stringify(serializable, null, 0));
+    log(`Session history saved (${history.length} messages)`);
+  } catch (err) {
+    log(`Failed to save session history: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function loadSessionHistory(): ChatCompletionMessageParam[] {
+  try {
+    if (!fs.existsSync(SESSION_HISTORY_PATH)) return [];
+    const data = JSON.parse(fs.readFileSync(SESSION_HISTORY_PATH, 'utf-8'));
+    if (!Array.isArray(data)) return [];
+    log(`Restored session history: ${data.length} messages`);
+    return data;
+  } catch (err) {
+    log(`Failed to load session history: ${err instanceof Error ? err.message : String(err)}`);
+    return [];
+  }
+}
+
 // ─── Run Query ───────────────────────────────────────────────────────────────
 
 async function runQuery(
@@ -969,10 +1398,15 @@ async function runQuery(
       conversationHistory.push(apiMessages[i]);
     }
 
-    // Trim conversation history if too long (simple sliding window)
-    while (conversationHistory.length > 100) {
-      conversationHistory.shift();
+    // Compact conversation history if approaching token limit
+    const compacted = await compactHistory(client, modelName, conversationHistory);
+    if (compacted !== conversationHistory) {
+      conversationHistory.length = 0;
+      conversationHistory.push(...compacted);
     }
+
+    // Save session to disk for resume
+    saveSessionHistory(conversationHistory);
 
     writeOutput({
       status: 'success',
@@ -1098,8 +1532,16 @@ async function main(): Promise<void> {
     }
   }
 
+  // Expose to module-level for team/background agent access
+  moduleClient = client;
+  moduleModelName = modelName;
+  moduleMcpClient = mcpClient;
+  moduleGmailClient = gmailClient;
+  moduleTools = allTools;
+
   const systemPrompt = buildSystemPrompt(containerInput);
-  const conversationHistory: ChatCompletionMessageParam[] = [];
+  const restoredHistory = loadSessionHistory();
+  const conversationHistory: ChatCompletionMessageParam[] = restoredHistory;
 
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
   try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
@@ -1132,6 +1574,55 @@ async function main(): Promise<void> {
 
       // Emit session update
       writeOutput({ status: 'success', result: null, newSessionId: containerInput.sessionId || `session-${Date.now()}` });
+
+      // Post-result polling: process teammate messages and background task completions
+      const hasActiveWork = () => {
+        for (const tm of teammates.values()) {
+          if (tm.status === 'active' && (tm.processing || tm.outbox.length > 0 || tm.pendingInbox.length > 0)) return true;
+        }
+        for (const task of backgroundTasks.values()) {
+          if (task.status === 'running') return true;
+        }
+        return false;
+      };
+
+      let closedDuringPolling = false;
+      while (hasActiveWork()) {
+        await new Promise(r => setTimeout(r, 500));
+        if (shouldClose()) { closedDuringPolling = true; break; }
+
+        const teamReplies: string[] = [];
+        for (const tm of teammates.values()) {
+          while (tm.outbox.length > 0) {
+            teamReplies.push(tm.outbox.shift()!);
+          }
+        }
+
+        const completedBg: string[] = [];
+        for (const [id, task] of backgroundTasks) {
+          if (task.status === 'completed' || task.status === 'failed') {
+            completedBg.push(`[Background task "${task.description}" (${id}): ${task.status}] ${task.result?.slice(0, 1000) || ''}`);
+            backgroundTasks.delete(id);
+          }
+        }
+
+        const notifications = [...teamReplies, ...completedBg];
+        if (notifications.length > 0) {
+          log(`Polling: injecting ${notifications.length} notification(s) into leader`);
+          prompt = notifications.join('\n\n');
+          const pollResult = await runQuery(
+            prompt, containerInput, client, modelName,
+            allTools, conversationHistory, systemPrompt, mcpClient, gmailClient,
+          );
+          if (pollResult.closedDuringQuery) { closedDuringPolling = true; break; }
+          writeOutput({ status: 'success', result: null, newSessionId: containerInput.sessionId || `session-${Date.now()}` });
+        }
+      }
+
+      if (closedDuringPolling) {
+        log('Close sentinel consumed during polling, exiting');
+        break;
+      }
 
       log('Query ended, waiting for next IPC message...');
       const nextMessage = await waitForIpcMessage();

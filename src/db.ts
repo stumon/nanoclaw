@@ -65,6 +65,30 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at);
 
+    CREATE TABLE IF NOT EXISTS duty_metrics (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL,
+      report_type TEXT NOT NULL,
+      group_name TEXT,
+      metric_name TEXT NOT NULL,
+      metric_value REAL NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_duty_metrics_lookup
+      ON duty_metrics(report_type, metric_name, group_name, date);
+
+    CREATE TABLE IF NOT EXISTS duty_anomalies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL,
+      report_type TEXT NOT NULL,
+      anomaly_key TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      reason TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_duty_anomalies_lookup
+      ON duty_anomalies(report_type, date);
+
     CREATE TABLE IF NOT EXISTS router_state (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL

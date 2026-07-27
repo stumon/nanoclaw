@@ -1,0 +1,60 @@
+#!/bin/bash
+# Tavily Web Search - Global deep search
+
+QUERY="${1:-}"
+if [ -z "$QUERY" ]; then
+    echo "Usage: search <query>"
+    exit 1
+fi
+
+API_KEY="${TAVILY_API_KEY:-}"
+if [ -z "$API_KEY" ]; then
+    echo "Error: TAVILY_API_KEY not set"
+    exit 1
+fi
+
+MAX_RESULTS="${2:-5}"
+
+echo "Searching: $QUERY"
+
+TMPFILE=$(mktemp)
+trap "rm -f $TMPFILE" EXIT
+
+python3 -c "
+import json, sys
+json.dump({
+    'query': sys.argv[1],
+    'max_results': int(sys.argv[2]),
+    'search_depth': 'advanced',
+    'include_answer': True,
+    'include_raw_content': False
+}, open(sys.argv[3], 'w'))
+" "$QUERY" "$MAX_RESULTS" "$TMPFILE"
+
+RESPONSE=$(curl -s -X POST "https://api.tavily.com/search" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $API_KEY" \
+  -d @"$TMPFILE")
+
+echo "$RESPONSE" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except json.JSONDecodeError as e:
+    print(f'Error parsing response: {e}')
+    sys.exit(1)
+if 'error' in d:
+    print(f'API Error: {d[\"error\"]}')
+    sys.exit(1)
+if 'answer' in d and d['answer']:
+    print('\nAnswer:')
+    print(d['answer'])
+print('\nSources:')
+for r in d.get('results', []):
+    print(f\"  - {r.get('title', 'No title')}\")
+    print(f\"    {r.get('url', '')}\")
+    snippet = r.get('content', '')
+    if snippet:
+        print(f\"    {snippet[:300]}\")
+    print()
+"

@@ -1,0 +1,87 @@
+name: "UC 值班巡查"
+report_type: "uc-cursor"
+
+grafana:
+  base_url: "https://monitoring.infra.sz.shopee.io/grafana"
+  dashboard_uid: "scXKigdVk"
+  org_id: 28
+  time_range_hours: 24
+  step_minutes: 15
+  max_data_points: 96
+
+query:
+  concurrency: 5
+  batch_size: 15
+  max_series_per_panel: 10
+  max_report_chars: 10000
+
+anomaly_rules:
+  - match_pattern: "99时延|99th.*耗时|p99"
+    match_flags: "i"
+    field: "max"
+    warning_threshold: 1
+    critical_threshold: 5
+    unit: "s"
+    label_template: "{label} P99={value}s"
+
+  - match_pattern: "成功率"
+    match_flags: "i"
+    field: "min"
+    below_threshold: true
+    warning_threshold: 99
+    critical_threshold: 95
+    unit: "%"
+    label_template: "{label} 成功率={value}%"
+    min_mean_threshold: 50
+
+  - match_pattern: "签名失败|失败"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 0
+    critical_threshold: 10
+    invert_for_warning: true
+    unit: ""
+    label_template: "{label} 失败={value}"
+
+  - match_pattern: "没有生成合同|没有生成激活"
+    match_flags: "i"
+    field: "latest"
+    warning_threshold: 0
+    critical_threshold: 10
+    invert_for_warning: true
+    unit: ""
+    label_template: "{label} 未生成={value}"
+
+generic_detection:
+  z_score_threshold: 4
+  spike_count_threshold: 5
+  trend_pct_threshold: 100
+  min_absolute_value: 1
+  max_reasons_per_panel: 3
+
+output:
+  recipient_env: "ON_DUTY_RECIPIENT"
+  fallback_recipient: "huanyu.guo@shopee.com"
+  subject_template: "[值班巡查] {today} {name}{critical_tag}"
+  ipc_chat_jid: "8619860743536@s.whatsapp.net"
+
+prompt:
+  role: "金融科技 UserCenter 值班数据分析师"
+  dashboard_description: "UC 各国激活、合同、请求量监控"
+  stage1_example: |
+    ID-UC入口99时延 | 告警 | P99从0.5s升至2.1s，需关注
+    TH-uc-contract接口成功率 | 严重 | 成功率降至93%，影响合同签署
+  stage2_example: |
+    [总体风险] 中
+    [一句话总结] ID区域P99时延上升，TH合同接口成功率下降需关注
+
+    [异常分析]
+    异常1: ID-UC入口99时延 | 原因: 可能有慢查询或上游依赖延迟 | 建议: 检查DB慢查询和上游服务 | 紧急度: 持续观察
+    异常2: TH-uc-contract接口成功率 | 原因: 合同服务异常 | 建议: 检查contract服务日志 | 紧急度: 立即处理
+
+    [关联发现]
+    P99上升和成功率下降可能相关：上游响应变慢导致超时
+
+    [值班行动]
+    1. 检查TH合同服务状态
+    2. 观察ID时延趋势

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nanoclaw.intel-evening</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/huanyu.guo/.nvm/versions/node/v24.3.0/bin/node</string>
+        <string>/Users/huanyu.guo/self/nanoclaw/node_modules/tsx/dist/cli.mjs</string>
+        <string>scripts/intel-station.ts</string>
+        <string>--period</string>
+        <string>evening</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/huanyu.guo/self/nanoclaw</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>16</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TZ</key>
+        <string>Asia/Shanghai</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/huanyu.guo</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/huanyu.guo/self/nanoclaw/logs/intel-evening-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/huanyu.guo/self/nanoclaw/logs/intel-evening-stderr.log</string>
+</dict>
+</plist>

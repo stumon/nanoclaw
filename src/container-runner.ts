@@ -69,7 +69,12 @@ function syncSkillsRecursive(srcRoot: string, dstRoot: string): void {
     const skillFile = path.join(srcDir, 'SKILL.md');
     if (fs.existsSync(skillFile)) {
       const dstDir = path.join(dstRoot, entry.name);
-      fs.cpSync(srcDir, dstDir, { recursive: true });
+      fs.cpSync(srcDir, dstDir, {
+        recursive: true,
+        filter: (src) =>
+          !src.includes(`${path.sep}.git${path.sep}`) &&
+          !src.endsWith(`${path.sep}.git`),
+      });
     } else {
       syncSkillsRecursive(srcDir, dstRoot);
     }

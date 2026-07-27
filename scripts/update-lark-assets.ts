@@ -47,6 +47,7 @@ interface Holding {
   assetType: string;
   quantity: number;
   priceCNY: number;
+  priceUSD?: number;
 }
 
 interface PlatformUpdate {
@@ -174,13 +175,17 @@ async function handleReplace(
 
   for (const h of platform.holdings) {
     try {
-      await createRecord(token, {
+      const fields: Record<string, unknown> = {
         '平台': platform.name,
         '资产': h.asset,
         '资产类型': h.assetType,
         '持仓数量': h.quantity,
         '价格-CNY': h.priceCNY,
-      });
+      };
+      if (h.priceUSD != null) {
+        fields['价格-USD'] = h.priceUSD;
+      }
+      await createRecord(token, fields);
       stats.created++;
       await sleep(50);
     } catch (err) {

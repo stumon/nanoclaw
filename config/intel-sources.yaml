@@ -1,0 +1,87 @@
+# 私人情报站 — 信息源配置
+# 编辑此文件增删信息源，无需改代码
+
+categories:
+  tech:
+    label: "科技"
+    emoji: "\U0001F52C"
+    sources:
+      - type: rss
+        url: "https://hnrss.org/frontpage?count=30"
+        name: HackerNews
+      - type: rss
+        url: "https://techcrunch.com/feed/"
+        name: TechCrunch
+      - type: rss
+        url: "https://www.theverge.com/rss/index.xml"
+        name: The Verge
+
+  ai:
+    label: "AI"
+    emoji: "\U0001F916"
+    sources:
+      - type: rss
+        url: "https://openai.com/blog/rss.xml"
+        name: OpenAI Blog
+      - type: tavily
+        query: "Anthropic Claude OR Google DeepMind OR Meta AI latest announcement"
+        name: AI Labs
+      - type: tavily
+        query: "AI LLM breakthrough OR release OR launch today"
+        name: AI News
+
+  github:
+    label: "开源"
+    emoji: "\U0001F525"
+    sources:
+      - type: github_trending
+        url: "https://github.com/trending?since=daily"
+        name: GitHub Trending
+
+  finance:
+    label: "财经"
+    emoji: "\U0001F4B0"
+    sources:
+      - type: rss
+        url: "https://feeds.bbci.co.uk/news/business/rss.xml"
+        name: BBC Business
+      - type: tavily
+        query: "Reuters business news today market stocks"
+        name: Reuters
+      - type: tavily
+        query: "36氪 今日热门 科技 融资"
+        name: 36Kr
+
+  world:
+    label: "世界"
+    emoji: "\U0001F30D"
+    sources:
+      - type: rss
+        url: "https://feeds.bbci.co.uk/news/world/rss.xml"
+        name: BBC World
+      - type: rss
+        url: "https://feeds.bbci.co.uk/news/technology/rss.xml"
+        name: BBC Technology
+
+  x_twitter:
+    label: "X/Twitter"
+    emoji: "\U0001F426"
+    sources:
+      - type: tavily
+        query: "site:x.com (AI OR LLM OR startup OR open source) latest"
+        name: X AI KOL
+      - type: tavily
+        query: "微信公众号 AI 深度学习 大模型 最新"
+        name: WeChat AI
+
+scoring:
+  # Uses OpenAI-compatible API (reads OPENAI_API_KEY + OPENAI_BASE_URL from .env)
+  model: "QwQ-32B"
+  min_score: 7
+  max_items_per_category: 5
+  # User profile for relevance scoring
+  user_profile: "软件工程师，关注 AI/LLM、开源项目、科技创业、投资理财"
+
+ipc:
+  dir_relative: "data/ipc/whatsapp_main/messages"
+  chat_jid: "8619860743536@s.whatsapp.net"

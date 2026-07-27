@@ -6,15 +6,14 @@
     <string>com.nanoclaw.hnair-hourly</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/env</string>
-        <string>npx</string>
-        <string>tsx</string>
+        <string>/Users/huanyu.guo/.nvm/versions/node/v24.3.0/bin/node</string>
+        <string>/Users/huanyu.guo/self/nanoclaw/node_modules/tsx/dist/cli.mjs</string>
         <string>scripts/hnair-ticket-check.ts</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/huanyu.guo/self/nanoclaw</string>
     <key>StartInterval</key>
-    <integer>3600</integer>
+    <integer>600</integer>
     <key>EnvironmentVariables</key>
     <dict>
         <key>TZ</key>

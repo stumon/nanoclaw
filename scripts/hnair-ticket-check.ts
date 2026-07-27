@@ -91,7 +91,7 @@ const DEFAULTS: HnairConfig = {
   destination: '乌鲁木齐',
   priceMax: 300,
   daysAhead: 180,
-  focusMonths: ['2026-05'],
+  focusMonths: ['2026-05', '2026-06'],
 };
 
 function loadConfig(): HnairConfig {
@@ -229,6 +229,28 @@ function formatDate(dateStr: string): string {
   const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return dateStr;
   return `${m[1]}年${parseInt(m[2], 10)}月${parseInt(m[3], 10)}日`;
+}
+
+function formatBeijingDateTime(date = new Date()): string {
+  return new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(date);
+}
+
+function formatFocusMonths(months: string[]): string {
+  return months
+    .map((month) => {
+      const m = month.match(/^(\d{4})-(\d{2})$/);
+      return m ? `${m[1]}年${parseInt(m[2], 10)}月` : month;
+    })
+    .join('、');
 }
 
 function extractPrices(text: string): number[] {
@@ -816,7 +838,7 @@ async function processRoute(cfg: HnairConfig, route: RouteConfig): Promise<void>
           const cheapestNew = [...newOnes].sort((a, b) => a.price - b.price)[0];
           const searchUrl = `https://m.hnair.com/#/flightList?orgCity=${cityToIata(route.origin)}&dstCity=${cityToIata(route.destination)}&departDate=${cheapestNew.date}&adultNum=1&childNum=0&infantNum=0&cabinClass=Y`;
 
-          let msg = `✈️ 海航PLUS 666 可购\n${routeLabel} 有 ${dateGroups.size} 个日期 ≤¥${route.priceMax}！\n`;
+          let msg = `✈️ 海航PLUS 666 可购\n推送时间：${formatBeijingDateTime()} 北京时间\n监控月份：${formatFocusMonths(route.focusMonths)}\n${routeLabel} 有 ${dateGroups.size} 个日期 ≤¥${route.priceMax}！\n`;
           if (in666.length > 0) {
             msg += `已知航班全部在 20:00-08:00 窗口（${in666.map(f => `${f.flightNo} ${f.depTime}`).join(' / ')}）\n\n`;
           } else {
